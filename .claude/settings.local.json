@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p doc)",
+      "Bash(mv MCP-BRIDGE.md MCP-ACTION-PLAN.md MCP-BRIDGE-SIMPLE.md doc/)"
+    ]
+  }
+}
