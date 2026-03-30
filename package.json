@@ -1,0 +1,35 @@
+{
+  "name": "beacon-mcp",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:http": "node dist/index.js --http",
+    "dev": "ts-node src/index.ts",
+    "dev:http": "ts-node src/index.ts --http"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ff14eternitalis-debug/Beacon-MCP.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/ff14eternitalis-debug/Beacon-MCP/issues"
+  },
+  "homepage": "https://github.com/ff14eternitalis-debug/Beacon-MCP#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.5.0",
+    "axios": "^1.14.0",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.2"
+  }
+}
