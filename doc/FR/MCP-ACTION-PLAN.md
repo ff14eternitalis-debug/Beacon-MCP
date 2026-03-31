@@ -83,29 +83,31 @@ Zéro variable d'environnement obligatoire — l'auth se fait interactivement vi
 
 **Durée estimée :** 1 à 2 jours
 
+> Endpoints et structures validés contre le code source Beacon (`C:\Users\forgo\Documents\Code\Projet-Beacon\Beacon`).
+
 ### Batch A — Projets & configs *(priorité haute)*
 
-- [ ] `list_projects()`
-- [ ] `get_project(projectId)`
-- [ ] `create_project(game, name)`
-- [ ] `generate_game_ini(projectId)`
-- [ ] `get_config_options(game)`
-- [ ] `update_config(projectId, options)`
+- [X] `beacon_list_projects()` — `GET /projects`
+- [X] `beacon_get_project(projectId)` — `GET /projects/{id}`
+- [X] `beacon_generate_game_ini(projectId, game, qualityScale?, difficultyValue?, mapMask?)` — `GET /{game}/projects/{id}/Game.ini`
+- [X] `beacon_put_game_ini(projectId, game, content)` — `PUT /{game}/projects/{id}/Game.ini` (texte brut)
+- [X] `beacon_get_config_options(game, filter?)` — `GET /{game}/configOptions` (lecture seule, affiche header/key/type/défaut/fichier)
+- [X] `beacon_create_project(game, name, description?)` — construit le binaire `application/x-beacon-project` (8 bytes magic + TAR.GZ) côté client, fetch userId via `/users/me`, POST vers `/projects`
 
 ### Batch B — Données de jeu *(priorité moyenne)*
 
-- [ ] `list_blueprints(game, filter?)`
-- [ ] `list_engrams(game, filter?)`
-- [ ] `list_loot_drops(game)`
-- [ ] `search_mods(game, query)`
+- [X] `beacon_list_blueprints(game, filter?, contentPackId?)` — `GET /{game}/blueprints`
+- [X] `beacon_list_engrams(game, filter?, contentPackId?)` — `GET /{game}/engrams`
+- [X] `beacon_list_loot_drops(game)` — `GET /{game}/lootDrops`
+- [X] `beacon_search_mods(game, query?)` — `GET /contentPacks?gameId=Ark|ArkSA`
 
 ### Batch C — Sentinel *(priorité selon besoins)*
 
-- [ ] `list_players(serviceId)`
-- [ ] `ban_player(serviceId, playerId)`
-- [ ] `unban_player(serviceId, playerId)`
-- [ ] `send_chat(serviceId, message)`
-- [ ] `run_rcon(serviceId, command)`
+- [X] `beacon_list_players(serviceId)` — `GET /sentinel/players?serviceId=`
+- [X] `beacon_ban_player(serviceId, playerId, reason?, expiration?)` — `POST /sentinel/serviceBans/{uuid}` (UUID généré côté client)
+- [X] `beacon_unban_player(serviceId, playerId)` — `GET /sentinel/serviceBans?expired=false` + `DELETE /sentinel/serviceBans/{id}`
+- [X] `beacon_send_chat(serviceId, message, senderName?, languageCode?)` — `POST /sentinel/chat` (204 No Content)
+- [X] `beacon_run_rcon(serviceId, type, command|message, senderName?)` — `POST /sentinel/gameCommands` (types : `admin`, `broadcast`, `chat`)
 
 ---
 
@@ -119,15 +121,20 @@ Zéro variable d'environnement obligatoire — l'auth se fait interactivement vi
 
 ### Étapes
 
-- [ ] Implémenter le socket TCP vers port `48962`
-- [ ] Handshake : envoi de la clé 32 bytes
-- [ ] Chiffrement AES-256-CBC avec IV aléatoire (`Node.js crypto` natif)
-- [ ] Gestion du nonce incrémental
-- [ ] Tools :
-  - [ ] `start_server(connectorConfig)`
-  - [ ] `stop_server(connectorConfig, message?)`
-  - [ ] `get_server_status(connectorConfig)`
-  - [ ] `set_server_param(connectorConfig, key, value)`
+- [X] Implémenter le socket TCP vers port `48962`
+- [X] Handshake : réception + déchiffrement de la connectionKey (AES + clé pré-partagée)
+- [X] Chiffrement AES-256-CBC avec IV aléatoire (`Node.js crypto` natif)
+- [X] CRC32 (polynomial 0xEDB88320) sur le payload clair
+- [X] Gestion du nonce incrémental
+- [X] Préparation de la clé : hex 64 chars → decode, sinon → SHA-256
+- [X] Tools :
+  - [X] `beacon_start_server(host, key, port?)`
+  - [X] `beacon_stop_server(host, key, port?, message?)`
+  - [X] `beacon_get_server_status(host, key, port?)`
+  - [X] `beacon_set_server_param(host, key, port?, param, value)`
+
+> Protocole extrait du code source Xojo du Connector (ControlSocket, BeaconEncryption, SymmetricHeader).
+> À tester avec un Connector en production — les endpoints ont été vérifiés contre le code source.
 
 ---
 
@@ -160,8 +167,8 @@ Zéro variable d'environnement obligatoire — l'auth se fait interactivement vi
 2. ✅ **Accès à l'API** — URL de production : `https://api.usebeacon.app/v4` (API v4, courante).
    Documentation : `https://help.usebeacon.app/api/v4/`
    Pas de staging documenté. L'URL est configurable via `BEACON_API_URL` dans `.env` pour pointer vers une instance locale si besoin.
-3. **Multi-comptes** — Un seul compte en `.env` ou gestion de plusieurs comptes ?
-4. **Jeux prioritaires** — Ark uniquement pour le MVP, ou multi-jeux d'emblée ?
+3. ✅ **Multi-comptes** — Un seul compte à la fois. Token stocké dans `~/.beacon-mcp/tokens.json`. Multi-comptes possible plus tard via `beacon_switch_account` si besoin.
+4. ✅ **Jeux prioritaires** — MVP : **ARK Survival Evolved** + **ARK Survival Ascended**. Palworld prévu en phase suivante.
 
 ---
 

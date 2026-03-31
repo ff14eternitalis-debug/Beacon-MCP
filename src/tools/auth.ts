@@ -1,14 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { registerTool, ToolDefinition, ToolResult } from "../registry.js";
+import { ToolDefinition } from "../registry.js";
+import { textResult, registerToolGroup } from "./shared.js";
 import { checkAuthStatus } from "../api/client.js";
 import { startDeviceFlow, pollDeviceFlow } from "../auth/oauth.js";
 import { loadPendingFlow, clearTokens } from "../auth/tokens.js";
 
 const EMPTY_INPUT_SCHEMA = { type: "object" as const, properties: {} };
-
-function textResult(text: string): ToolResult {
-  return { content: [{ type: "text", text }] };
-}
 
 const loginTool: ToolDefinition = {
   name: "beacon_login",
@@ -49,14 +46,11 @@ const loginCheckTool: ToolDefinition = {
   inputSchema: EMPTY_INPUT_SCHEMA,
   handler: async () => {
     const pending = loadPendingFlow();
-
     if (!pending) {
       return textResult("Aucune connexion en cours. Appelle beacon_login pour démarrer.");
     }
-
     try {
       const result = await pollDeviceFlow(pending);
-
       switch (result.status) {
         case "pending":
           return textResult(
@@ -92,7 +86,6 @@ const authStatusTool: ToolDefinition = {
   inputSchema: EMPTY_INPUT_SCHEMA,
   handler: async () => {
     const status = await checkAuthStatus();
-
     if (status.connected) {
       const tokens = status.tokens!;
       const accessExpiry = new Date(tokens.accessTokenExpiry * 1000).toLocaleString("fr-FR");
@@ -109,7 +102,6 @@ const authStatusTool: ToolDefinition = {
           .join("\n")
       );
     }
-
     return textResult(
       ["Non connecté à Beacon.", `Raison : ${status.error}`, "", "Appelle beacon_login pour te connecter."].join("\n")
     );
@@ -127,13 +119,5 @@ const logoutTool: ToolDefinition = {
 };
 
 export function registerAuthTools(server: McpServer): void {
-  for (const tool of [loginTool, loginCheckTool, authStatusTool, logoutTool]) {
-    registerTool(tool);
-    server.tool(
-      tool.name,
-      tool.description,
-      tool.inputSchema.properties,
-      (_args) => tool.handler({})
-    );
-  }
+  registerToolGroup(server, [loginTool, loginCheckTool, authStatusTool, logoutTool]);
 }

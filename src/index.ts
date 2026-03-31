@@ -3,6 +3,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import "dotenv/config";
 
 import { registerAuthTools } from "./tools/auth.js";
+import { registerProjectTools } from "./tools/projects.js";
+import { registerGameDataTools } from "./tools/gamedata.js";
+import { registerSentinelTools } from "./tools/sentinel.js";
+import { registerConnectorTools } from "./tools/connector.js";
 import { startHttpServer } from "./server/http.js";
 
 const server = new McpServer({
@@ -10,9 +14,12 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
-// --- Enregistrement des tools (commun aux deux modes) ---
+// --- Enregistrement des tools ---
 registerAuthTools(server);
-// Phase 3+ : registerProjectTools(server), registerBlueprintTools(server), ...
+registerProjectTools(server);
+registerGameDataTools(server);
+registerSentinelTools(server);
+registerConnectorTools(server);
 
 // --- Sélection du mode de transport ---
 const useHttp = process.argv.includes("--http");

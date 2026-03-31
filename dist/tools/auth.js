@@ -1,14 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerAuthTools = registerAuthTools;
-const registry_js_1 = require("../registry.js");
+const shared_js_1 = require("./shared.js");
 const client_js_1 = require("../api/client.js");
 const oauth_js_1 = require("../auth/oauth.js");
 const tokens_js_1 = require("../auth/tokens.js");
 const EMPTY_INPUT_SCHEMA = { type: "object", properties: {} };
-function textResult(text) {
-    return { content: [{ type: "text", text }] };
-}
 const loginTool = {
     name: "beacon_login",
     description: "Démarre la connexion à Beacon via OAuth2 device flow. " +
@@ -19,7 +16,7 @@ const loginTool = {
         try {
             const flow = await (0, oauth_js_1.startDeviceFlow)();
             const minutes = Math.floor(flow.expiresIn / 60);
-            return textResult([
+            return (0, shared_js_1.textResult)([
                 "Connexion Beacon démarrée.",
                 "",
                 `Code : ${flow.userCode}`,
@@ -32,7 +29,7 @@ const loginTool = {
             ].join("\n"));
         }
         catch (err) {
-            return textResult(`Impossible de démarrer le flow de connexion : ${String(err)}`);
+            return (0, shared_js_1.textResult)(`Impossible de démarrer le flow de connexion : ${String(err)}`);
         }
     },
 };
@@ -45,29 +42,29 @@ const loginCheckTool = {
     handler: async () => {
         const pending = (0, tokens_js_1.loadPendingFlow)();
         if (!pending) {
-            return textResult("Aucune connexion en cours. Appelle beacon_login pour démarrer.");
+            return (0, shared_js_1.textResult)("Aucune connexion en cours. Appelle beacon_login pour démarrer.");
         }
         try {
             const result = await (0, oauth_js_1.pollDeviceFlow)(pending);
             switch (result.status) {
                 case "pending":
-                    return textResult("En attente de l'autorisation... L'utilisateur n'a pas encore validé dans son navigateur. Réessaie dans 5 secondes.");
+                    return (0, shared_js_1.textResult)("En attente de l'autorisation... L'utilisateur n'a pas encore validé dans son navigateur. Réessaie dans 5 secondes.");
                 case "expired":
-                    return textResult("Le code a expiré. Appelle beacon_login pour obtenir un nouveau code.");
+                    return (0, shared_js_1.textResult)("Le code a expiré. Appelle beacon_login pour obtenir un nouveau code.");
                 case "success":
-                    return textResult([
+                    return (0, shared_js_1.textResult)([
                         "Connecté à Beacon avec succès !",
                         "Les tokens sont sauvegardés et renouvelés automatiquement.",
                         "Tu peux maintenant utiliser tous les tools Beacon.",
                     ].join("\n"));
                 default: {
                     const _exhaustive = result;
-                    return textResult(`Statut inattendu : ${JSON.stringify(_exhaustive)}`);
+                    return (0, shared_js_1.textResult)(`Statut inattendu : ${JSON.stringify(_exhaustive)}`);
                 }
             }
         }
         catch (err) {
-            return textResult(`Erreur lors de la vérification : ${String(err)}`);
+            return (0, shared_js_1.textResult)(`Erreur lors de la vérification : ${String(err)}`);
         }
     },
 };
@@ -83,7 +80,7 @@ const authStatusTool = {
             const tokens = status.tokens;
             const accessExpiry = new Date(tokens.accessTokenExpiry * 1000).toLocaleString("fr-FR");
             const refreshExpiry = new Date(tokens.refreshTokenExpiry * 1000).toLocaleString("fr-FR");
-            return textResult([
+            return (0, shared_js_1.textResult)([
                 "Connecté à Beacon.",
                 `Utilisateur : ${status.userId ?? "inconnu"}`,
                 status.email ? `Email       : ${status.email}` : "",
@@ -93,7 +90,7 @@ const authStatusTool = {
                 .filter(Boolean)
                 .join("\n"));
         }
-        return textResult(["Non connecté à Beacon.", `Raison : ${status.error}`, "", "Appelle beacon_login pour te connecter."].join("\n"));
+        return (0, shared_js_1.textResult)(["Non connecté à Beacon.", `Raison : ${status.error}`, "", "Appelle beacon_login pour te connecter."].join("\n"));
     },
 };
 const logoutTool = {
@@ -102,12 +99,9 @@ const logoutTool = {
     inputSchema: EMPTY_INPUT_SCHEMA,
     handler: async () => {
         (0, tokens_js_1.clearTokens)();
-        return textResult("Déconnecté. Les tokens locaux ont été supprimés.");
+        return (0, shared_js_1.textResult)("Déconnecté. Les tokens locaux ont été supprimés.");
     },
 };
 function registerAuthTools(server) {
-    for (const tool of [loginTool, loginCheckTool, authStatusTool, logoutTool]) {
-        (0, registry_js_1.registerTool)(tool);
-        server.tool(tool.name, tool.description, tool.inputSchema.properties, (_args) => tool.handler({}));
-    }
+    (0, shared_js_1.registerToolGroup)(server, [loginTool, loginCheckTool, authStatusTool, logoutTool]);
 }
