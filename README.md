@@ -160,6 +160,7 @@ The installer work already includes:
 For a full user-facing guide, see:
 
 - [Installation Guide](doc/ENG/MCP-INSTALLATION-GUIDE.md)
+- [User Guide](doc/ENG/MCP-USER-GUIDE.md)
 
 ---
 
