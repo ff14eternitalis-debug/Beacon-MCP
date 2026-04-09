@@ -63,7 +63,7 @@ export async function checkAuthStatus(): Promise<{
   }
 
   try {
-    const response = await beaconClient.get("/users/me");
+    const response = await beaconClient.get("/user");
     return {
       connected: true,
       userId: response.data?.userId,

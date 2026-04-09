@@ -4,3 +4,5 @@ dist/
 .env.local
 *.log
 .claude/
+output-*.json
+*-inspection.json

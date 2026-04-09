@@ -11,11 +11,18 @@ import {
 export const BEACON_API_BASE =
   process.env.BEACON_API_URL ?? "https://api.usebeacon.app/v4";
 
-// App web officielle Beacon — publique, pas de client_secret requis
+// App desktop officielle Beacon.
+//
+// The website app id can be rejected by /device depending on the OAuth flow
+// and registered capabilities. For a local MCP, the desktop app id is the
+// safest default because the Beacon desktop client uses it for login.
 export const BEACON_CLIENT_ID =
-  process.env.BEACON_CLIENT_ID ?? "12877547-7ad0-466f-a001-77815043c96b";
+  process.env.BEACON_CLIENT_ID ?? "9f823fcf-eb7a-41c0-9e4b-db8ed4396f80";
 
-export const BEACON_SCOPES = "common users:read sentinel:read sentinel:write";
+// Keep the default scope minimal so local login succeeds with the broadest
+// compatibility. Broader scopes can be requested explicitly through .env.
+export const BEACON_SCOPES =
+  process.env.BEACON_SCOPES ?? "common users:read";
 
 const authClient = axios.create({
   baseURL: BEACON_API_BASE,

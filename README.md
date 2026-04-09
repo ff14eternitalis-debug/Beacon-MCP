@@ -33,6 +33,9 @@ The MCP itself is functional and already includes:
 - structured tool responses
 - OAuth device flow authentication
 - project listing and project metadata
+- project creation with a basic map mask
+- safe project mod activation/deactivation
+- safe engram unlock overrides
 - `Game.ini` read/write
 - `GameUserSettings.ini` read/write
 - config option listing
@@ -152,7 +155,54 @@ The installer work already includes:
 
 For a full user-facing guide, see:
 
-- [Installation Guide](C:\Users\forgo\Documents\Code\Projet-Beacon\Beacon-MCP\doc\ENG\MCP-INSTALLATION-GUIDE.md)
+- [Installation Guide](doc/ENG/MCP-INSTALLATION-GUIDE.md)
+
+---
+
+## Safe Project Editing
+
+The MCP now includes guarded project editing tools for common Beacon workflows:
+
+- `beacon_set_project_mod` activates or disables a mod in a project without overwriting the other configured mods.
+- `beacon_set_engram_unlock` adds or updates an engram override, for example unlocking `CS Tek Forge` at level `180`.
+
+These tools are designed to be used through an assistant conversation rather than as blind writes. A good assistant flow is:
+
+```text
+User: Create an ArkSA project to unlock Tek Forge at level 180.
+Assistant: Which map?
+Assistant: Which mod contains Tek Forge?
+Assistant: Confirm: ArkSA project, The Island, Cybers Structures QoL+, CS Tek Forge level 180?
+```
+
+Only after confirmation should the assistant call the write tools.
+
+Guardrails currently implemented:
+
+- verifies the project belongs to the connected Beacon user with the `Owner` role
+- verifies the requested game matches the project game
+- verifies mods through Beacon content packs
+- asks for confirmation through `contentPackId` if a mod name has multiple matches
+- preserves existing mod selections instead of replacing them
+- preserves existing engram overrides and updates only the matching engram
+- creates a local `.beacon` backup before writes by default
+- reloads the project after writing to confirm the requested change
+
+Local backups are written to:
+
+```text
+~/.beacon-mcp/backups/
+```
+
+Example workflow for Cybers Structures QoL+ Tek Forge:
+
+```text
+Call beacon_search_mods game="arksa" query="Cybers Structures QoL+"
+Call beacon_list_engrams game="arksa" filter="tek forge" contentPackId="<contentPackId>"
+Call beacon_create_project game="arksa" name="test 180" mapMask=1
+Call beacon_set_project_mod game="arksa" projectId="<projectId>" contentPackId="<contentPackId>"
+Call beacon_set_engram_unlock game="arksa" projectId="<projectId>" engramId="<engramId>" level=180
+```
 
 ---
 
@@ -207,6 +257,8 @@ Call beacon_list_projects
 - `beacon_list_projects`
 - `beacon_get_project`
 - `beacon_create_project`
+- `beacon_set_project_mod`
+- `beacon_set_engram_unlock`
 - `beacon_generate_game_ini`
 - `beacon_put_game_ini`
 - `beacon_generate_game_user_settings_ini`
@@ -375,13 +427,13 @@ node dist/cli.js --check-node
 
 Useful docs:
 
-- [Installation Guide](C:\Users\forgo\Documents\Code\Projet-Beacon\Beacon-MCP\doc\ENG\MCP-INSTALLATION-GUIDE.md)
-- [v1 Test Plan](C:\Users\forgo\Documents\Code\Projet-Beacon\Beacon-MCP\doc\ENG\MCP-V1-TEST-PLAN.md)
-- [V2 Action Plan](C:\Users\forgo\Documents\Code\Projet-Beacon\Beacon-MCP\doc\ENG\MCP-V2-ACTION-PLAN.md)
-- [Windows Installer MVP Plan](C:\Users\forgo\Documents\Code\Projet-Beacon\Beacon-MCP\doc\ENG\MCP-WINDOWS-INSTALLER-MVP-PLAN.md)
-- [Windows Installer Tech Design](C:\Users\forgo\Documents\Code\Projet-Beacon\Beacon-MCP\doc\ENG\MCP-WINDOWS-INSTALLER-TECH-DESIGN.md)
-- [`.exe` Runtime Transition Plan](C:\Users\forgo\Documents\Code\Projet-Beacon\Beacon-MCP\doc\ENG\MCP-EXE-RUNTIME-TRANSITION-PLAN.md)
-- [Codex Smoke Tests](C:\Users\forgo\Documents\Code\Projet-Beacon\Beacon-MCP\doc\ENG\MCP-CODEX-SMOKE-TESTS.md)
+- [Installation Guide](doc/ENG/MCP-INSTALLATION-GUIDE.md)
+- [v1 Test Plan](doc/ENG/MCP-V1-TEST-PLAN.md)
+- [V2 Action Plan](doc/ENG/MCP-V2-ACTION-PLAN.md)
+- [Windows Installer MVP Plan](doc/ENG/MCP-WINDOWS-INSTALLER-MVP-PLAN.md)
+- [Windows Installer Tech Design](doc/ENG/MCP-WINDOWS-INSTALLER-TECH-DESIGN.md)
+- [`.exe` Runtime Transition Plan](doc/ENG/MCP-EXE-RUNTIME-TRANSITION-PLAN.md)
+- [Codex Smoke Tests](doc/ENG/MCP-CODEX-SMOKE-TESTS.md)
 
 French equivalents are available in `doc/FR`.
 
