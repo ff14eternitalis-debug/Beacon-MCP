@@ -446,6 +446,111 @@ function buildBlueprintReference(engram: JsonRecord): JsonRecord {
   };
 }
 
+function quoteIniValue(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function buildNamedEngramEntryOverride(attribute: JsonRecord): string | undefined {
+  const entryString = String(attribute["Entry String"] ?? "").trim();
+  if (!entryString) return undefined;
+
+  const argumentsList = [`EngramClassName=${quoteIniValue(entryString)}`];
+  const level = attribute["Player Level"];
+  const points = attribute["Unlock Points"];
+  const removePrerequisites = attribute["Remove Prerequisites"];
+
+  // Beacon always emits level + points because the game falls back poorly otherwise.
+  argumentsList.push(`EngramLevelRequirement=${Number.isFinite(Number(level)) ? Math.trunc(Number(level)) : 1}`);
+  argumentsList.push(`EngramPointsCost=${Number.isFinite(Number(points)) ? Math.trunc(Number(points)) : 0}`);
+
+  if (typeof removePrerequisites === "boolean") {
+    argumentsList.push(`RemoveEngramPreReq=${removePrerequisites ? "True" : "False"}`);
+  }
+
+  return `OverrideNamedEngramEntries=(${argumentsList.join(",")})`;
+}
+
+function extractEngramOverrideLines(game: ProjectGame, v7data: JsonRecord): string[] {
+  const baseConfig = getBaseConfigSet(v7data);
+  const controlName = engramControlName(game);
+  const control = baseConfig[controlName];
+  if (!control || typeof control !== "object" || Array.isArray(control)) return [];
+
+  const overrides = (control as JsonRecord).Overrides;
+  if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) return [];
+
+  const attributes = (overrides as JsonRecord).Attributes;
+  if (!Array.isArray(attributes)) return [];
+
+  return attributes
+    .filter((attribute): attribute is JsonRecord => Boolean(attribute) && typeof attribute === "object" && !Array.isArray(attribute))
+    .map((attribute) => buildNamedEngramEntryOverride(attribute))
+    .filter((line): line is string => typeof line === "string" && line.length > 0);
+}
+
+function appendLinesToShooterGameIni(content: string, lines: string[]): string {
+  if (lines.length === 0) return content;
+
+  const sectionHeader = "[/script/shootergame.shootergamemode]";
+  const trimmed = content.trimEnd();
+  const hasSection = trimmed.toLowerCase().includes(sectionHeader.toLowerCase());
+
+  if (!hasSection) {
+    return [trimmed, "", sectionHeader, ...lines].filter((part) => part.length > 0).join("\n");
+  }
+
+  const normalized = trimmed.replace(/\r\n/g, "\n");
+  const segments = normalized.split("\n");
+  const output: string[] = [];
+  let inserted = false;
+
+  for (let index = 0; index < segments.length; index += 1) {
+    const line = segments[index];
+    output.push(line);
+
+    if (!inserted && line.trim().toLowerCase() === sectionHeader.toLowerCase()) {
+      let nextIndex = index + 1;
+      while (nextIndex < segments.length && !segments[nextIndex].startsWith("[")) {
+        output.push(segments[nextIndex]);
+        nextIndex += 1;
+      }
+      output.push(...lines);
+      inserted = true;
+      index = nextIndex - 1;
+    }
+  }
+
+  return output.join("\n");
+}
+
+async function buildEffectiveProjectExport(
+  projectId: string,
+  game: ProjectGame,
+  file: "all" | "game" | "gus",
+  params: Record<string, unknown>
+): Promise<{ gameIni?: string; gameUserSettingsIni?: string; derivedGameIniLines: string[] }> {
+  const includeGameIni = file === "all" || file === "game";
+  const includeGus = file === "all" || file === "gus";
+  const binary = await fetchProjectBinary(projectId);
+  const { v7data } = await parseBeaconBinary(binary);
+  const derivedGameIniLines = extractEngramOverrideLines(game, v7data);
+
+  const [rawGameIni, gameUserSettingsIni] = await Promise.all([
+    includeGameIni ? getProjectConfigFile(projectId, game, "Game.ini", params) : Promise.resolve(undefined),
+    includeGus
+      ? file === "all"
+        ? getProjectConfigFileOptional(projectId, game, "GameUserSettings.ini")
+        : getProjectConfigFile(projectId, game, "GameUserSettings.ini")
+      : Promise.resolve(undefined),
+  ]);
+
+  const gameIni = rawGameIni !== undefined
+    ? appendLinesToShooterGameIni(rawGameIni, derivedGameIniLines)
+    : undefined;
+
+  return { gameIni, gameUserSettingsIni, derivedGameIniLines };
+}
+
 // ---- beacon_list_projects ----
 
 const listProjectsTool: ToolDefinition = {
@@ -998,17 +1103,14 @@ const exportProjectCodeTool: ToolDefinition = {
         difficultyValueResult.value,
         mapMaskResult.value
       );
-
-      const includeGameIni = file === "all" || file === "game";
+      const exportBundle = await buildEffectiveProjectExport(
+        projectId,
+        game,
+        file as "all" | "game" | "gus",
+        params
+      );
+      const { gameIni, gameUserSettingsIni, derivedGameIniLines } = exportBundle;
       const includeGus = file === "all" || file === "gus";
-      const [gameIni, gameUserSettingsIni] = await Promise.all([
-        includeGameIni ? getProjectConfigFile(projectId, game, "Game.ini", params) : Promise.resolve(undefined),
-        includeGus
-          ? file === "all"
-            ? getProjectConfigFileOptional(projectId, game, "GameUserSettings.ini")
-            : getProjectConfigFile(projectId, game, "GameUserSettings.ini")
-          : Promise.resolve(undefined),
-      ]);
 
       const sections: string[] = [];
       if (gameIni !== undefined) {
@@ -1027,6 +1129,7 @@ const exportProjectCodeTool: ToolDefinition = {
         {
           projectId,
           game,
+          derivedGameIniLines,
           files: {
             ...(gameIni !== undefined ? { "Game.ini": gameIni } : {}),
             ...(gameUserSettingsIni !== undefined
@@ -1123,17 +1226,14 @@ const exportProjectFileTool: ToolDefinition = {
         difficultyValueResult.value,
         mapMaskResult.value
       );
-
-      const includeGameIni = file === "all" || file === "game";
+      const exportBundle = await buildEffectiveProjectExport(
+        projectId,
+        game,
+        file as "all" | "game" | "gus",
+        params
+      );
+      const { gameIni, gameUserSettingsIni, derivedGameIniLines } = exportBundle;
       const includeGus = file === "all" || file === "gus";
-      const [gameIni, gameUserSettingsIni] = await Promise.all([
-        includeGameIni ? getProjectConfigFile(projectId, game, "Game.ini", params) : Promise.resolve(undefined),
-        includeGus
-          ? file === "all"
-            ? getProjectConfigFileOptional(projectId, game, "GameUserSettings.ini")
-            : getProjectConfigFile(projectId, game, "GameUserSettings.ini")
-          : Promise.resolve(undefined),
-      ]);
 
       const projectName = projectNameResult.value ?? projectId;
       const lines = [
@@ -1177,6 +1277,7 @@ const exportProjectFileTool: ToolDefinition = {
           game,
           file,
           exportPath,
+          derivedGameIniLines,
           exportedFiles: {
             ...(gameIni !== undefined ? { "Game.ini": true } : {}),
             ...(gameUserSettingsIni !== undefined
