@@ -29,6 +29,8 @@ const CONFIG_OPTION_GAMES = ["ark", "arksa", "palworld", "7dtd"] as const;
 const GAME_VARIABLE_GAMES = ["ark", "arksa", "palworld"] as const;
 type ProjectGame = (typeof PROJECT_GAMES)[number];
 type JsonRecord = Record<string, unknown>;
+type LootExportFile = "all" | "game" | "gus";
+type LootOverrideRecord = JsonRecord;
 
 // ---------------------------------------------------------------------------
 // Format binaire .beacon
@@ -386,6 +388,117 @@ async function resolveContentPack(game: ProjectGame, contentPackId?: string, mod
   return { ok: true as const, pack: matches[0], choices: matches };
 }
 
+async function searchProjectsForCurrentUser(search?: string): Promise<JsonRecord[]> {
+  const meRes = await beaconClient.get("/user");
+  const userId = String(meRes.data?.userId ?? "");
+  if (!userId) {
+    throw new Error("Impossible de récupérer l'userId. Vérifiez la connexion avec beacon_auth_status.");
+  }
+  const params: Record<string, string> = {};
+  if (search) params.search = search;
+  const res = await beaconClient.get(`/users/${userId}/projects`, { params });
+  const projects = res.data?.results ?? res.data ?? [];
+  return Array.isArray(projects) ? (projects as JsonRecord[]) : [];
+}
+
+async function resolveProjectReference(
+  reference: { projectId?: string; projectName?: string },
+  options?: { game?: ProjectGame; fieldPrefix?: string }
+): Promise<
+  | { ok: true; projectId: string; project: JsonRecord }
+  | { ok: false; result: ReturnType<typeof invalidParams> }
+> {
+  const fieldPrefix = options?.fieldPrefix ? `${options.fieldPrefix}` : "";
+  const projectId = String(reference.projectId ?? "").trim();
+  const projectName = String(reference.projectName ?? "").trim();
+
+  if (projectId) {
+    try {
+      const project = await fetchReadableProject(projectId);
+      const gameId = String(project.manifest.gameId ?? "");
+      if (options?.game && gameId !== expectedGameId(options.game)) {
+        return {
+          ok: false,
+          result: invalidParams(`Le projet est ${gameId || "inconnu"}, pas ${expectedGameId(options.game)}.`, {
+            projectId,
+            game: options.game,
+          }),
+        };
+      }
+      return {
+        ok: true,
+        projectId,
+        project: {
+          projectId,
+          name: project.manifest.name ?? projectId,
+          gameId,
+        },
+      };
+    } catch (err) {
+      return { ok: false, result: formatApiError(err) };
+    }
+  }
+
+  if (!projectName) {
+    return {
+      ok: false,
+      result: invalidParams(`Paramètre ${fieldPrefix}projectId ou ${fieldPrefix}projectName requis.`, {
+        acceptedFields: [`${fieldPrefix}projectId`, `${fieldPrefix}projectName`],
+      }),
+    };
+  }
+
+  try {
+    const projects = await searchProjectsForCurrentUser(projectName);
+    const filtered = projects.filter((project) => {
+      const name = String(project.name ?? "");
+      const gameId = String(project.gameId ?? "");
+      const gameMatches = options?.game ? gameId === expectedGameId(options.game) : true;
+      return gameMatches;
+    });
+    const exactMatches = filtered.filter(
+      (project) => String(project.name ?? "").toLowerCase() === projectName.toLowerCase()
+    );
+    const matches = exactMatches.length > 0 ? exactMatches : filtered;
+
+    if (matches.length === 0) {
+      return {
+        ok: false,
+        result: invalidParams(`Aucun projet trouvé avec le nom "${projectName}".`, {
+          [`${fieldPrefix}projectName`]: projectName,
+          game: options?.game,
+        }),
+      };
+    }
+
+    if (matches.length > 1) {
+      const lines = matches
+        .slice(0, 10)
+        .map((project) => `• [${project.projectId}] ${project.name ?? "Sans nom"} (${project.gameId ?? ""})`)
+        .join("\n");
+      return {
+        ok: false,
+        result: invalidParams(
+          `Plusieurs projets correspondent à "${projectName}". Confirmez avec ${fieldPrefix}projectId :\n${lines}`,
+          {
+            [`${fieldPrefix}projectName`]: projectName,
+            choices: matches,
+          }
+        ),
+      };
+    }
+
+    const project = matches[0];
+    return {
+      ok: true,
+      projectId: String(project.projectId ?? ""),
+      project,
+    };
+  } catch (err) {
+    return { ok: false, result: formatApiError(err) };
+  }
+}
+
 async function getEngram(game: ProjectGame, engramId: string): Promise<JsonRecord> {
   const res = await beaconClient.get(`/${game}/engrams/${engramId}`);
   return res.data as JsonRecord;
@@ -424,6 +537,335 @@ function getBaseConfigSet(v7data: JsonRecord): JsonRecord {
   }
 
   return configSetData[configSetId] as JsonRecord;
+}
+
+function deepCloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function optionalStringArray(args: Record<string, unknown>, key: string) {
+  const value = args[key];
+  if (value === undefined || value === null || value === "") {
+    return { ok: true as const, value: undefined as string[] | undefined };
+  }
+  if (Array.isArray(value)) {
+    const items = value
+      .filter((item) => item !== undefined && item !== null && String(item).trim().length > 0)
+      .map((item) => String(item).trim());
+    return { ok: true as const, value: items };
+  }
+  if (typeof value === "string") {
+    const items = value
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+    return { ok: true as const, value: items };
+  }
+  return {
+    ok: false as const,
+    result: invalidParams(`Paramètre ${key} invalide.`, {
+      field: key,
+      expected: "string[] | comma-separated string",
+    }),
+  };
+}
+
+function optionalRecord(args: Record<string, unknown>, key: string) {
+  const value = args[key];
+  if (value === undefined || value === null || value === "") {
+    return { ok: true as const, value: undefined as JsonRecord | undefined };
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return { ok: true as const, value: value as JsonRecord };
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return { ok: true as const, value: parsed as JsonRecord };
+      }
+    } catch {
+      // handled below
+    }
+  }
+  return {
+    ok: false as const,
+    result: invalidParams(`Paramètre ${key} invalide.`, {
+      field: key,
+      expected: "object | JSON object string",
+    }),
+  };
+}
+
+function lootDropsConfigName(game: ProjectGame): "Ark.LootDrops" | "ArkSA.LootDrops" {
+  return game === "ark" ? "Ark.LootDrops" : "ArkSA.LootDrops";
+}
+
+function getLootDropsConfig(v7data: JsonRecord, game: ProjectGame): JsonRecord {
+  const baseConfig = getBaseConfigSet(v7data);
+  const configName = lootDropsConfigName(game);
+  const current = baseConfig[configName];
+  if (!current || typeof current !== "object" || Array.isArray(current)) {
+    baseConfig[configName] = {
+      Implicit: false,
+      overrides: [],
+    };
+  }
+  return baseConfig[configName] as JsonRecord;
+}
+
+function getLootOverrides(v7data: JsonRecord, game: ProjectGame): LootOverrideRecord[] {
+  const lootConfig = getLootDropsConfig(v7data, game);
+  if (!Array.isArray(lootConfig.overrides)) {
+    lootConfig.overrides = [];
+  }
+  return (lootConfig.overrides as unknown[]).filter(
+    (item): item is LootOverrideRecord => Boolean(item) && typeof item === "object" && !Array.isArray(item)
+  );
+}
+
+function setLootOverrides(v7data: JsonRecord, game: ProjectGame, overrides: LootOverrideRecord[]): void {
+  const lootConfig = getLootDropsConfig(v7data, game);
+  lootConfig.Implicit = false;
+  lootConfig.overrides = overrides;
+}
+
+function getOverrideDefinition(override: LootOverrideRecord): JsonRecord | undefined {
+  const definition = override.definition;
+  return definition && typeof definition === "object" && !Array.isArray(definition)
+    ? (definition as JsonRecord)
+    : undefined;
+}
+
+function getOverrideSets(override: LootOverrideRecord): JsonRecord[] {
+  const sets = override.sets;
+  if (!Array.isArray(sets)) return [];
+  return sets.filter(
+    (item): item is JsonRecord => Boolean(item) && typeof item === "object" && !Array.isArray(item)
+  );
+}
+
+function getSetEntries(set: JsonRecord): JsonRecord[] {
+  const entries = set.entries;
+  if (!Array.isArray(entries)) return [];
+  return entries.filter(
+    (item): item is JsonRecord => Boolean(item) && typeof item === "object" && !Array.isArray(item)
+  );
+}
+
+function getEntryOptions(entry: JsonRecord): JsonRecord[] {
+  const options = entry.options;
+  if (!Array.isArray(options)) return [];
+  return options.filter(
+    (item): item is JsonRecord => Boolean(item) && typeof item === "object" && !Array.isArray(item)
+  );
+}
+
+function lootDropIdentity(override: LootOverrideRecord): { blueprintId: string; classString: string; label: string } {
+  const definition = getOverrideDefinition(override) ?? {};
+  return {
+    blueprintId: String(definition.blueprintId ?? "").trim(),
+    classString: String(definition.classString ?? "").trim(),
+    label: String(definition.label ?? "").trim(),
+  };
+}
+
+function lootOverrideFingerprint(override: LootOverrideRecord): string {
+  const normalizedSets = getOverrideSets(override).map((set) => ({
+    label: String(set.label ?? ""),
+    minNumItems: Number(set.minNumItems ?? 0),
+    maxNumItems: Number(set.maxNumItems ?? 0),
+    weight: Number(set.weight ?? 0),
+    preventDuplicates: Boolean(set.preventDuplicates),
+    entries: getSetEntries(set).map((entry) => ({
+      minQuantity: Number(entry.minQuantity ?? 0),
+      maxQuantity: Number(entry.maxQuantity ?? 0),
+      minQuality: String(entry.minQuality ?? ""),
+      maxQuality: String(entry.maxQuality ?? ""),
+      blueprintChance: Number(entry.blueprintChance ?? 0),
+      weight: Number(entry.weight ?? 0),
+      singleItemQuantity: Boolean(entry.singleItemQuantity),
+      preventGrinding: Boolean(entry.preventGrinding),
+      statClampMultiplier: Number(entry.statClampMultiplier ?? 0),
+      options: getEntryOptions(entry).map((option) => {
+        const engram = option.engram;
+        const record =
+          engram && typeof engram === "object" && !Array.isArray(engram) ? (engram as JsonRecord) : {};
+        return {
+          label: String(record.label ?? ""),
+          blueprintId: String(record.blueprintId ?? ""),
+          classString: String(record.classString ?? ""),
+          weight: Number(option.weight ?? 0),
+        };
+      }),
+    })),
+  }));
+  return createHash("sha1").update(JSON.stringify(normalizedSets)).digest("hex");
+}
+
+function collectOverrideContentPackIds(override: LootOverrideRecord): string[] {
+  const contentPackIds = new Set<string>();
+  const definition = getOverrideDefinition(override);
+  const definitionPack = String(definition?.contentPackId ?? "").trim();
+  if (definitionPack) contentPackIds.add(definitionPack);
+
+  for (const set of getOverrideSets(override)) {
+    for (const entry of getSetEntries(set)) {
+      for (const option of getEntryOptions(entry)) {
+        const engram = option.engram;
+        if (engram && typeof engram === "object" && !Array.isArray(engram)) {
+          const contentPackId = String((engram as JsonRecord).contentPackId ?? "").trim();
+          if (contentPackId) contentPackIds.add(contentPackId);
+        }
+      }
+    }
+  }
+
+  return [...contentPackIds];
+}
+
+function mergeRequiredContentPacks(manifest: JsonRecord, overrides: LootOverrideRecord[]): string[] {
+  const selections = getModSelections(manifest);
+  const enabledIds = new Set<string>();
+  for (const override of overrides) {
+    for (const contentPackId of collectOverrideContentPackIds(override)) {
+      selections[contentPackId] = true;
+      enabledIds.add(contentPackId);
+    }
+  }
+  manifest.modSelections = selections;
+  return [...enabledIds];
+}
+
+function findOverrideIndex(
+  overrides: LootOverrideRecord[],
+  matcher: { lootDropId?: string; lootDropClassString?: string }
+): number {
+  const wantedId = String(matcher.lootDropId ?? "").trim().toLowerCase();
+  const wantedClass = String(matcher.lootDropClassString ?? "").trim().toLowerCase();
+  return overrides.findIndex((override) => {
+    const identity = lootDropIdentity(override);
+    return (
+      (wantedId.length > 0 && identity.blueprintId.toLowerCase() === wantedId) ||
+      (wantedClass.length > 0 && identity.classString.toLowerCase() === wantedClass)
+    );
+  });
+}
+
+function summarizeLootOverride(override: LootOverrideRecord) {
+  const identity = lootDropIdentity(override);
+  const sets = getOverrideSets(override);
+  const entries = sets.flatMap((set) => getSetEntries(set));
+  const options = entries.flatMap((entry) => getEntryOptions(entry));
+  const contentPacks = new Map<string, string>();
+  for (const option of options) {
+    const engram = option.engram;
+    if (engram && typeof engram === "object" && !Array.isArray(engram)) {
+      const record = engram as JsonRecord;
+      const id = String(record.contentPackId ?? "").trim();
+      const name = String(record.contentPackName ?? "").trim();
+      if (id) contentPacks.set(id, name || id);
+    }
+  }
+
+  return {
+    lootDropId: identity.blueprintId,
+    label: identity.label,
+    classString: identity.classString,
+    minItemSets: Number(override.minItemSets ?? 0),
+    maxItemSets: Number(override.maxItemSets ?? 0),
+    addToDefaults: Boolean(override.addToDefaults),
+    preventDuplicates: Boolean(override.preventDuplicates),
+    setCount: sets.length,
+    entryCount: entries.length,
+    optionCount: options.length,
+    contentPacks: [...contentPacks.entries()].map(([contentPackId, contentPackName]) => ({
+      contentPackId,
+      contentPackName,
+    })),
+    sampleItems: options.slice(0, 8).map((option) => {
+      const engram = option.engram;
+      const record =
+        engram && typeof engram === "object" && !Array.isArray(engram) ? (engram as JsonRecord) : {};
+      return String(record.label ?? record.classString ?? "Item");
+    }),
+  };
+}
+
+function summarizeLootFamily(overrides: LootOverrideRecord[]) {
+  const summary = overrides.map((override) => summarizeLootOverride(override));
+  return {
+    familyKey: lootOverrideFingerprint(overrides[0]),
+    overrides: summary,
+    labels: summary.map((item) => item.label),
+    classStrings: summary.map((item) => item.classString),
+  };
+}
+
+function findLootFamily(
+  overrides: LootOverrideRecord[],
+  family: string
+): { familyKey: string; overrides: LootOverrideRecord[] } | undefined {
+  const wanted = family.trim().toLowerCase();
+  if (!wanted) return undefined;
+
+  const groups = new Map<string, LootOverrideRecord[]>();
+  for (const override of overrides) {
+    const key = lootOverrideFingerprint(override);
+    const current = groups.get(key) ?? [];
+    current.push(override);
+    groups.set(key, current);
+  }
+
+  for (const [familyKey, familyOverrides] of groups.entries()) {
+    if (familyKey.toLowerCase() === wanted) {
+      return { familyKey, overrides: familyOverrides };
+    }
+
+    if (
+      familyOverrides.some((override) => {
+        const identity = lootDropIdentity(override);
+        return (
+          identity.label.toLowerCase() === wanted ||
+          identity.classString.toLowerCase() === wanted ||
+          identity.blueprintId.toLowerCase() === wanted
+        );
+      })
+    ) {
+      return { familyKey, overrides: familyOverrides };
+    }
+  }
+
+  return undefined;
+}
+
+async function fetchReadableProject(projectId: string): Promise<{ manifest: JsonRecord; v7data: JsonRecord; binary: Buffer }> {
+  const binary = await fetchProjectBinary(projectId);
+  const parsed = await parseBeaconBinary(binary);
+  return { ...parsed, binary };
+}
+
+function validateLootOverrideRecord(override: JsonRecord): { ok: true; value: LootOverrideRecord } | { ok: false; message: string } {
+  const definition = getOverrideDefinition(override);
+  if (!definition) {
+    return { ok: false, message: "Le payload override doit contenir un objet definition." };
+  }
+
+  const blueprintId = String(definition.blueprintId ?? "").trim();
+  const classString = String(definition.classString ?? "").trim();
+  if (!blueprintId && !classString) {
+    return {
+      ok: false,
+      message: "Le payload override doit contenir definition.blueprintId ou definition.classString.",
+    };
+  }
+
+  const sets = getOverrideSets(override);
+  if (sets.length === 0) {
+    return { ok: false, message: "Le payload override doit contenir au moins un item set dans sets." };
+  }
+
+  return { ok: true, value: override };
 }
 
 function ensureEditor(v7data: JsonRecord, editorName: string): void {
@@ -551,6 +993,148 @@ async function buildEffectiveProjectExport(
   return { gameIni, gameUserSettingsIni, derivedGameIniLines };
 }
 
+type ExportFormat = "full" | "overrides_only";
+
+function buildProjectChatExport(
+  projectId: string,
+  game: ProjectGame,
+  file: "all" | "game" | "gus",
+  format: ExportFormat,
+  bundle: { gameIni?: string; gameUserSettingsIni?: string; derivedGameIniLines: string[] }
+): { message: string; payload: JsonRecord } {
+  const { gameIni, gameUserSettingsIni, derivedGameIniLines } = bundle;
+  const includeGus = file === "all" || file === "gus";
+
+  if (format === "overrides_only") {
+    if (derivedGameIniLines.length === 0) {
+      return {
+        message: `Aucune ligne d'override dérivée trouvée pour ${gameName(game)} (projet ${projectId}).`,
+        payload: {
+          projectId,
+          game,
+          file,
+          format,
+          derivedGameIniLines,
+        },
+      };
+    }
+
+    return {
+      message: [
+        `Overrides utiles pour ${gameName(game)} (projet ${projectId}) :`,
+        "",
+        "```ini",
+        derivedGameIniLines.join("\n"),
+        "```",
+      ].join("\n"),
+      payload: {
+        projectId,
+        game,
+        file,
+        format,
+        derivedGameIniLines,
+      },
+    };
+  }
+
+  const sections: string[] = [];
+  if (gameIni !== undefined) {
+    sections.push(["[Game.ini]", "```ini", gameIni, "```"].join("\n"));
+  }
+  if (gameUserSettingsIni !== undefined) {
+    sections.push(["[GameUserSettings.ini]", "```ini", gameUserSettingsIni, "```"].join("\n"));
+  } else if (includeGus && file === "all") {
+    sections.push(
+      "[GameUserSettings.ini]\n```text\nNon disponible via l'API Beacon pour ce projet.\n```"
+    );
+  }
+
+  return {
+    message: `Export de configuration pour ${gameName(game)} (projet ${projectId}) :\n\n${sections.join("\n\n")}`,
+    payload: {
+      projectId,
+      game,
+      file,
+      format,
+      derivedGameIniLines,
+      files: {
+        ...(gameIni !== undefined ? { "Game.ini": gameIni } : {}),
+        ...(gameUserSettingsIni !== undefined
+          ? { "GameUserSettings.ini": gameUserSettingsIni }
+          : includeGus && file === "all"
+          ? { "GameUserSettings.ini": null }
+          : {}),
+      },
+    },
+  };
+}
+
+function buildProjectFileExport(
+  projectId: string,
+  projectName: string,
+  game: ProjectGame,
+  file: "all" | "game" | "gus",
+  mapMask: string | undefined,
+  format: ExportFormat,
+  bundle: { gameIni?: string; gameUserSettingsIni?: string; derivedGameIniLines: string[] }
+): { content: string; exportedFiles: Record<string, boolean> } {
+  const { gameIni, gameUserSettingsIni, derivedGameIniLines } = bundle;
+  const includeGus = file === "all" || file === "gus";
+
+  if (format === "overrides_only") {
+    const lines = [
+      `Project: ${projectName}`,
+      `Project ID: ${projectId}`,
+      `Game: ${gameName(game)}`,
+      ...(mapMask ? [`Map Mask: ${mapMask}`] : []),
+      "",
+      "===== OverrideNamedEngramEntries =====",
+      ...(derivedGameIniLines.length > 0
+        ? derivedGameIniLines
+        : ["Aucune ligne d'override dérivée trouvée pour ce projet."]),
+      "",
+    ];
+
+    return {
+      content: lines.join("\n"),
+      exportedFiles: {},
+    };
+  }
+
+  const lines = [
+    `Project: ${projectName}`,
+    `Project ID: ${projectId}`,
+    `Game: ${gameName(game)}`,
+    ...(mapMask ? [`Map Mask: ${mapMask}`] : []),
+    "",
+  ];
+
+  if (gameIni !== undefined) {
+    lines.push("===== Game.ini =====", gameIni, "");
+  }
+  if (gameUserSettingsIni !== undefined) {
+    lines.push("===== GameUserSettings.ini =====", gameUserSettingsIni, "");
+  } else if (includeGus && file === "all") {
+    lines.push(
+      "===== GameUserSettings.ini =====",
+      "Non disponible via l'API Beacon pour ce projet.",
+      ""
+    );
+  }
+
+  return {
+    content: lines.join("\n"),
+    exportedFiles: {
+      ...(gameIni !== undefined ? { "Game.ini": true } : {}),
+      ...(gameUserSettingsIni !== undefined
+        ? { "GameUserSettings.ini": true }
+        : includeGus && file === "all"
+        ? { "GameUserSettings.ini": false }
+        : {}),
+    },
+  };
+}
+
 // ---- beacon_list_projects ----
 
 const listProjectsTool: ToolDefinition = {
@@ -576,22 +1160,120 @@ const listProjectsTool: ToolDefinition = {
   },
 };
 
+// ---- beacon_find_project ----
+
+const findProjectTool: ToolDefinition = {
+  name: "beacon_find_project",
+  description:
+    "Recherche un projet Beacon par nom ou fragment de nom pour éviter d'avoir à fournir un UUID. " +
+    "Peut être filtré par jeu et retourne les meilleurs candidats.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "Nom complet ou fragment de nom à rechercher",
+      },
+      game: {
+        type: "string",
+        enum: [...PROJECT_GAMES],
+        description: "Jeu cible optionnel : 'ark' ou 'arksa'",
+      },
+      limit: {
+        type: "number",
+        description: "Nombre maximum de résultats à retourner (défaut : 10, max : 25)",
+      },
+    },
+    required: ["query"],
+  },
+  handler: async (args) => {
+    const queryResult = requireString(args, "query");
+    if (!queryResult.ok) return queryResult.result;
+    const gameResult = optionalString(args, "game");
+    if (!gameResult.ok) return gameResult.result;
+    const limitResult = optionalNumber(args, "limit");
+    if (!limitResult.ok) return limitResult.result;
+
+    const query = queryResult.value.trim();
+    const requestedGame = gameResult.value?.trim().toLowerCase();
+    if (requestedGame && !PROJECT_GAMES.includes(requestedGame as ProjectGame)) {
+      return invalidParams("Paramètre game invalide. Valeurs acceptées : ark, arksa.", {
+        field: "game",
+        acceptedValues: PROJECT_GAMES,
+      });
+    }
+    const game = requestedGame as ProjectGame | undefined;
+    const limit = Math.min(25, Math.max(1, Math.floor(limitResult.value ?? 10)));
+
+    try {
+      const projects = await searchProjectsForCurrentUser(query);
+      const normalized = query.toLowerCase();
+      const filtered = projects
+        .filter((project) => {
+          const gameId = String(project.gameId ?? "");
+          if (game && gameId !== expectedGameId(game)) return false;
+          const name = String(project.name ?? "").toLowerCase();
+          return name.includes(normalized);
+        })
+        .sort((a, b) => {
+          const aName = String(a.name ?? "").toLowerCase();
+          const bName = String(b.name ?? "").toLowerCase();
+          const aExact = aName === normalized ? 0 : aName.startsWith(normalized) ? 1 : 2;
+          const bExact = bName === normalized ? 0 : bName.startsWith(normalized) ? 1 : 2;
+          if (aExact !== bExact) return aExact - bExact;
+          return aName.localeCompare(bName);
+        })
+        .slice(0, limit);
+
+      if (filtered.length === 0) {
+        return textResult(`Aucun projet trouvé pour "${query}".`, [], {
+          count: 0,
+          query,
+          game,
+        });
+      }
+
+      const lines = filtered.map((project, index) => {
+        const name = String(project.name ?? "Sans nom");
+        const projectId = String(project.projectId ?? "");
+        const gameId = String(project.gameId ?? "");
+        return `${index + 1}. [${projectId}] ${name} (${gameId})`;
+      });
+
+      return textResult(
+        `Projets trouvés pour "${query}" (${filtered.length}) :\n${lines.join("\n")}`,
+        filtered,
+        { count: filtered.length, query, game }
+      );
+    } catch (err) {
+      return formatApiError(err);
+    }
+  },
+};
+
 // ---- beacon_get_project ----
 
 const getProjectTool: ToolDefinition = {
   name: "beacon_get_project",
-  description: "Retourne les métadonnées d'un projet Beacon par son ID.",
+  description: "Retourne les métadonnées d'un projet Beacon par son ID ou son nom.",
   inputSchema: {
     type: "object",
     properties: {
       projectId: { type: "string", description: "Identifiant UUID du projet" },
+      projectName: { type: "string", description: "Nom exact du projet si l'UUID n'est pas connu" },
     },
-    required: ["projectId"],
   },
   handler: async (args) => {
-    const projectIdResult = requireString(args, "projectId");
+    const projectIdResult = optionalString(args, "projectId");
     if (!projectIdResult.ok) return projectIdResult.result;
-    const projectId = projectIdResult.value;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
+    const resolved = await resolveProjectReference({
+      projectId: projectIdResult.value,
+      projectName: projectNameResult.value,
+    });
+    if (!resolved.ok) return resolved.result;
+    const projectId = resolved.projectId;
     try {
       const res = await beaconClient.get(`/projects/${projectId}`, {
         headers: { Accept: "application/json" },
@@ -715,6 +1397,7 @@ const setProjectModTool: ToolDefinition = {
     type: "object",
     properties: {
       projectId: { type: "string", description: "ID UUID du projet Beacon" },
+      projectName: { type: "string", description: "Nom du projet Beacon si l'UUID n'est pas connu" },
       game: {
         type: "string",
         enum: [...PROJECT_GAMES],
@@ -737,11 +1420,13 @@ const setProjectModTool: ToolDefinition = {
         description: "Créer une sauvegarde locale du projet avant écriture. Défaut : true",
       },
     },
-    required: ["projectId", "game"],
+    required: ["game"],
   },
   handler: async (args) => {
-    const projectIdResult = requireString(args, "projectId");
+    const projectIdResult = optionalString(args, "projectId");
     if (!projectIdResult.ok) return projectIdResult.result;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
     const gameResult = requireGame(args, "game", PROJECT_GAMES);
     if (!gameResult.ok) return gameResult.result;
     const contentPackIdResult = optionalString(args, "contentPackId");
@@ -753,11 +1438,16 @@ const setProjectModTool: ToolDefinition = {
     const backupLocalResult = optionalBoolean(args, "backupLocal", true);
     if (!backupLocalResult.ok) return backupLocalResult.result;
 
-    const projectId = projectIdResult.value;
     const game = gameResult.value as ProjectGame;
     const enabled = enabledResult.value ?? true;
 
     try {
+      const resolvedProject = await resolveProjectReference({
+        projectId: projectIdResult.value,
+        projectName: projectNameResult.value,
+      }, { game });
+      if (!resolvedProject.ok) return resolvedProject.result;
+      const projectId = resolvedProject.projectId;
       const packResult = await resolveContentPack(game, contentPackIdResult.value, modNameResult.value);
       if (!packResult.ok) return packResult.result;
 
@@ -830,6 +1520,7 @@ const setEngramUnlockTool: ToolDefinition = {
     type: "object",
     properties: {
       projectId: { type: "string", description: "ID UUID du projet Beacon" },
+      projectName: { type: "string", description: "Nom du projet Beacon si l'UUID n'est pas connu" },
       game: {
         type: "string",
         enum: [...PROJECT_GAMES],
@@ -864,11 +1555,13 @@ const setEngramUnlockTool: ToolDefinition = {
         description: "Créer une sauvegarde locale du projet avant écriture. Défaut : true",
       },
     },
-    required: ["projectId", "game", "engramId", "level"],
+    required: ["game", "engramId", "level"],
   },
   handler: async (args) => {
-    const projectIdResult = requireString(args, "projectId");
+    const projectIdResult = optionalString(args, "projectId");
     if (!projectIdResult.ok) return projectIdResult.result;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
     const gameResult = requireGame(args, "game", PROJECT_GAMES);
     if (!gameResult.ok) return gameResult.result;
     const engramIdResult = requireString(args, "engramId");
@@ -886,7 +1579,6 @@ const setEngramUnlockTool: ToolDefinition = {
     const backupLocalResult = optionalBoolean(args, "backupLocal", true);
     if (!backupLocalResult.ok) return backupLocalResult.result;
 
-    const projectId = projectIdResult.value;
     const game = gameResult.value as ProjectGame;
     const level = levelResult.value;
     if (level === undefined || !Number.isFinite(level) || level < 1) {
@@ -896,6 +1588,12 @@ const setEngramUnlockTool: ToolDefinition = {
     }
 
     try {
+      const resolvedProject = await resolveProjectReference({
+        projectId: projectIdResult.value,
+        projectName: projectNameResult.value,
+      }, { game });
+      if (!resolvedProject.ok) return resolvedProject.result;
+      const projectId = resolvedProject.projectId;
       const engram = await getEngram(game, engramIdResult.value);
       const targetEngramId = String(engram.engramId ?? engram.blueprintId ?? engram.objectId ?? engram.id ?? "");
       if (!targetEngramId) {
@@ -1035,6 +1733,580 @@ const setEngramUnlockTool: ToolDefinition = {
   },
 };
 
+// ---- beacon_inspect_loot_project ----
+
+const inspectLootProjectTool: ToolDefinition = {
+  name: "beacon_inspect_loot_project",
+  description:
+    "Inspecte la structure loot d'un projet Beacon et résume ses overrides, familles réutilisées, item sets et content packs utiles.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      projectId: { type: "string", description: "ID UUID du projet Beacon" },
+      projectName: { type: "string", description: "Nom du projet Beacon si l'UUID n'est pas connu" },
+      game: {
+        type: "string",
+        enum: [...PROJECT_GAMES],
+        description: "Jeu cible : 'ark' ou 'arksa'",
+      },
+    },
+    required: ["game"],
+  },
+  handler: async (args) => {
+    const projectIdResult = optionalString(args, "projectId");
+    if (!projectIdResult.ok) return projectIdResult.result;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
+    const gameResult = requireGame(args, "game", PROJECT_GAMES);
+    if (!gameResult.ok) return gameResult.result;
+
+    const game = gameResult.value as ProjectGame;
+
+    try {
+      const resolvedProject = await resolveProjectReference({
+        projectId: projectIdResult.value,
+        projectName: projectNameResult.value,
+      }, { game });
+      if (!resolvedProject.ok) return resolvedProject.result;
+      const projectId = resolvedProject.projectId;
+      const source = await fetchReadableProject(projectId);
+      const manifestGameId = String(source.manifest.gameId ?? "");
+      if (manifestGameId !== expectedGameId(game)) {
+        return invalidParams(`Le projet est ${manifestGameId || "inconnu"}, pas ${expectedGameId(game)}.`, {
+          projectId,
+          game,
+          manifestGameId,
+        });
+      }
+
+      const overrides = getLootOverrides(source.v7data, game);
+      const groups = new Map<string, LootOverrideRecord[]>();
+      for (const override of overrides) {
+        const key = lootOverrideFingerprint(override);
+        const current = groups.get(key) ?? [];
+        current.push(override);
+        groups.set(key, current);
+      }
+
+      const familySummaries = [...groups.values()].map((familyOverrides) => summarizeLootFamily(familyOverrides));
+      const enabledModSelections = Object.entries(getModSelections(source.manifest))
+        .filter(([, enabled]) => enabled)
+        .map(([contentPackId]) => contentPackId);
+      const contentPacksUsedByLoot = new Map<string, string>();
+      for (const override of overrides) {
+        for (const contentPackId of collectOverrideContentPackIds(override)) {
+          const summary = summarizeLootOverride(override);
+          const pack = summary.contentPacks.find((item) => item.contentPackId === contentPackId);
+          contentPacksUsedByLoot.set(contentPackId, pack?.contentPackName ?? contentPackId);
+        }
+      }
+
+      const lines = [
+        `Inspection loot du projet ${String(source.manifest.name ?? projectId)} (${projectId})`,
+        `Jeu : ${gameName(game)}`,
+        `Overrides loot : ${overrides.length}`,
+        `Familles réutilisées : ${familySummaries.length}`,
+        `Content packs activés : ${enabledModSelections.length}`,
+        "",
+        ...familySummaries.slice(0, 12).map((family, index) => {
+          const labels = family.labels.slice(0, 4).join(", ");
+          return `${index + 1}. Famille ${family.familyKey.slice(0, 8)} — ${family.overrides.length} override(s) — ${labels}`;
+        }),
+      ];
+
+      return textResult(
+        lines.join("\n"),
+        {
+          projectId,
+          projectName: source.manifest.name ?? projectId,
+          game,
+          mapMask: source.manifest.map,
+          overrideCount: overrides.length,
+          familyCount: familySummaries.length,
+          enabledModSelections,
+          contentPacksUsedByLoot: [...contentPacksUsedByLoot.entries()].map(([contentPackId, contentPackName]) => ({
+            contentPackId,
+            contentPackName,
+          })),
+          families: familySummaries,
+          overrides: overrides.map((override) => summarizeLootOverride(override)),
+        },
+        {
+          projectId,
+          game,
+          overrideCount: overrides.length,
+          familyCount: familySummaries.length,
+        }
+      );
+    } catch (err) {
+      return formatApiError(err);
+    }
+  },
+};
+
+// ---- beacon_copy_loot_overrides ----
+
+const copyLootOverridesTool: ToolDefinition = {
+  name: "beacon_copy_loot_overrides",
+  description:
+    "Copie un ou plusieurs overrides de loot d'un projet source vers un projet cible, avec garde-fous propriétaire/jeu, backup local et fusion des mods requis.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      sourceProjectId: { type: "string", description: "Projet source contenant les overrides loot" },
+      sourceProjectName: { type: "string", description: "Nom du projet source si l'UUID n'est pas connu" },
+      targetProjectId: { type: "string", description: "Projet cible à modifier" },
+      targetProjectName: { type: "string", description: "Nom du projet cible si l'UUID n'est pas connu" },
+      game: {
+        type: "string",
+        enum: [...PROJECT_GAMES],
+        description: "Jeu cible : 'ark' ou 'arksa'",
+      },
+      lootDropIds: {
+        type: "array",
+        items: { type: "string" },
+        description: "Liste optionnelle des blueprintIds de loot drops à copier",
+      },
+      lootDropClassStrings: {
+        type: "array",
+        items: { type: "string" },
+        description: "Liste optionnelle des class strings de loot drops à copier",
+      },
+      backupLocal: {
+        type: "boolean",
+        description: "Créer une sauvegarde locale du projet cible avant écriture. Défaut : true",
+      },
+      replaceExisting: {
+        type: "boolean",
+        description: "Remplacer les overrides existants du même loot drop dans le projet cible. Défaut : true",
+      },
+    },
+    required: ["game"],
+  },
+  handler: async (args) => {
+    const sourceProjectIdResult = optionalString(args, "sourceProjectId");
+    if (!sourceProjectIdResult.ok) return sourceProjectIdResult.result;
+    const sourceProjectNameResult = optionalString(args, "sourceProjectName");
+    if (!sourceProjectNameResult.ok) return sourceProjectNameResult.result;
+    const targetProjectIdResult = optionalString(args, "targetProjectId");
+    if (!targetProjectIdResult.ok) return targetProjectIdResult.result;
+    const targetProjectNameResult = optionalString(args, "targetProjectName");
+    if (!targetProjectNameResult.ok) return targetProjectNameResult.result;
+    const gameResult = requireGame(args, "game", PROJECT_GAMES);
+    if (!gameResult.ok) return gameResult.result;
+    const lootDropIdsResult = optionalStringArray(args, "lootDropIds");
+    if (!lootDropIdsResult.ok) return lootDropIdsResult.result;
+    const lootDropClassStringsResult = optionalStringArray(args, "lootDropClassStrings");
+    if (!lootDropClassStringsResult.ok) return lootDropClassStringsResult.result;
+    const backupLocalResult = optionalBoolean(args, "backupLocal", true);
+    if (!backupLocalResult.ok) return backupLocalResult.result;
+    const replaceExistingResult = optionalBoolean(args, "replaceExisting", true);
+    if (!replaceExistingResult.ok) return replaceExistingResult.result;
+
+    const game = gameResult.value as ProjectGame;
+    const wantedIds = new Set((lootDropIdsResult.value ?? []).map((value) => value.toLowerCase()));
+    const wantedClasses = new Set((lootDropClassStringsResult.value ?? []).map((value) => value.toLowerCase()));
+    const shouldFilter = wantedIds.size > 0 || wantedClasses.size > 0;
+
+    try {
+      const [resolvedSource, resolvedTarget] = await Promise.all([
+        resolveProjectReference(
+          { projectId: sourceProjectIdResult.value, projectName: sourceProjectNameResult.value },
+          { game, fieldPrefix: "source" }
+        ),
+        resolveProjectReference(
+          { projectId: targetProjectIdResult.value, projectName: targetProjectNameResult.value },
+          { game, fieldPrefix: "target" }
+        ),
+      ]);
+      if (!resolvedSource.ok) return resolvedSource.result;
+      if (!resolvedTarget.ok) return resolvedTarget.result;
+      const sourceProjectId = resolvedSource.projectId;
+      const targetProjectId = resolvedTarget.projectId;
+      const [source, target] = await Promise.all([
+        fetchReadableProject(sourceProjectId),
+        assertProjectOwnershipAndGame(targetProjectId, game),
+      ]);
+      if (String(source.manifest.gameId ?? "") !== expectedGameId(game)) {
+        return invalidParams(`Le projet source est ${String(source.manifest.gameId ?? "inconnu")}, pas ${expectedGameId(game)}.`, {
+          sourceProjectId,
+          game,
+        });
+      }
+
+      const sourceOverrides = getLootOverrides(source.v7data, game);
+      const selectedOverrides = sourceOverrides
+        .filter((override) => {
+          if (!shouldFilter) return true;
+          const identity = lootDropIdentity(override);
+          return (
+            wantedIds.has(identity.blueprintId.toLowerCase()) ||
+            wantedClasses.has(identity.classString.toLowerCase())
+          );
+        })
+        .map((override) => deepCloneJson(override));
+
+      if (selectedOverrides.length === 0) {
+        return invalidParams("Aucun override loot correspondant trouvé dans le projet source.", {
+          sourceProjectId,
+          lootDropIds: lootDropIdsResult.value,
+          lootDropClassStrings: lootDropClassStringsResult.value,
+        });
+      }
+
+      const nextOverrides = getLootOverrides(target.v7data, game).map((override) => deepCloneJson(override));
+      const inserted: string[] = [];
+      const replaced: string[] = [];
+      for (const override of selectedOverrides) {
+        const identity = lootDropIdentity(override);
+        const index = findOverrideIndex(nextOverrides, {
+          lootDropId: identity.blueprintId,
+          lootDropClassString: identity.classString,
+        });
+        if (index >= 0) {
+          if (replaceExistingResult.value ?? true) {
+            nextOverrides[index] = override;
+            replaced.push(identity.label || identity.classString || identity.blueprintId);
+          }
+        } else {
+          nextOverrides.push(override);
+          inserted.push(identity.label || identity.classString || identity.blueprintId);
+        }
+      }
+
+      setLootOverrides(target.v7data, game, nextOverrides);
+      const enabledContentPackIds = mergeRequiredContentPacks(target.manifest, selectedOverrides);
+      let backup: { path: string; sha256: string } | undefined;
+      if (backupLocalResult.value ?? true) {
+        backup = await writeProjectBackup(targetProjectId, target.binary);
+      }
+
+      const saveMeta = await saveProjectBinary(target.manifest, target.v7data);
+      const confirmation = await assertProjectOwnershipAndGame(targetProjectId, game);
+      const confirmedOverrides = getLootOverrides(confirmation.v7data, game);
+
+      return textResult(
+        [
+          `Overrides loot copiés vers ${targetProjectId}.`,
+          `Source : ${sourceProjectId}`,
+          `Copiés : ${selectedOverrides.length}`,
+          `Ajoutés : ${inserted.length}`,
+          `Remplacés : ${replaced.length}`,
+          ...(backup ? [`Backup : ${backup.path}`] : []),
+        ].join("\n"),
+        {
+          sourceProjectId,
+          targetProjectId,
+          game,
+          copiedOverrides: selectedOverrides.map((override) => summarizeLootOverride(override)),
+          inserted,
+          replaced,
+          enabledContentPackIds,
+          backup,
+          revision: saveMeta.revision,
+          confirmedOverrideCount: confirmedOverrides.length,
+        },
+        {
+          sourceProjectId,
+          targetProjectId,
+          game,
+          copiedCount: selectedOverrides.length,
+        }
+      );
+    } catch (err) {
+      return formatApiError(err);
+    }
+  },
+};
+
+// ---- beacon_copy_loot_family ----
+
+const copyLootFamilyTool: ToolDefinition = {
+  name: "beacon_copy_loot_family",
+  description:
+    "Copie une famille complète de loot drops réutilisés d'un projet source vers un projet cible à partir d'un label, class string ou familyKey.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      sourceProjectId: { type: "string", description: "Projet source contenant la famille loot" },
+      sourceProjectName: { type: "string", description: "Nom du projet source si l'UUID n'est pas connu" },
+      targetProjectId: { type: "string", description: "Projet cible à modifier" },
+      targetProjectName: { type: "string", description: "Nom du projet cible si l'UUID n'est pas connu" },
+      game: {
+        type: "string",
+        enum: [...PROJECT_GAMES],
+        description: "Jeu cible : 'ark' ou 'arksa'",
+      },
+      family: {
+        type: "string",
+        description: "Label, classString, lootDropId ou familyKey de la famille à copier",
+      },
+      backupLocal: {
+        type: "boolean",
+        description: "Créer une sauvegarde locale du projet cible avant écriture. Défaut : true",
+      },
+      replaceExisting: {
+        type: "boolean",
+        description: "Remplacer les overrides existants du même loot drop dans le projet cible. Défaut : true",
+      },
+    },
+    required: ["game", "family"],
+  },
+  handler: async (args) => {
+    const sourceProjectIdResult = optionalString(args, "sourceProjectId");
+    if (!sourceProjectIdResult.ok) return sourceProjectIdResult.result;
+    const sourceProjectNameResult = optionalString(args, "sourceProjectName");
+    if (!sourceProjectNameResult.ok) return sourceProjectNameResult.result;
+    const targetProjectIdResult = optionalString(args, "targetProjectId");
+    if (!targetProjectIdResult.ok) return targetProjectIdResult.result;
+    const targetProjectNameResult = optionalString(args, "targetProjectName");
+    if (!targetProjectNameResult.ok) return targetProjectNameResult.result;
+    const gameResult = requireGame(args, "game", PROJECT_GAMES);
+    if (!gameResult.ok) return gameResult.result;
+    const familyResult = requireString(args, "family");
+    if (!familyResult.ok) return familyResult.result;
+    const backupLocalResult = optionalBoolean(args, "backupLocal", true);
+    if (!backupLocalResult.ok) return backupLocalResult.result;
+    const replaceExistingResult = optionalBoolean(args, "replaceExisting", true);
+    if (!replaceExistingResult.ok) return replaceExistingResult.result;
+
+    const game = gameResult.value as ProjectGame;
+    const family = familyResult.value;
+
+    try {
+      const [resolvedSource, resolvedTarget] = await Promise.all([
+        resolveProjectReference(
+          { projectId: sourceProjectIdResult.value, projectName: sourceProjectNameResult.value },
+          { game, fieldPrefix: "source" }
+        ),
+        resolveProjectReference(
+          { projectId: targetProjectIdResult.value, projectName: targetProjectNameResult.value },
+          { game, fieldPrefix: "target" }
+        ),
+      ]);
+      if (!resolvedSource.ok) return resolvedSource.result;
+      if (!resolvedTarget.ok) return resolvedTarget.result;
+      const sourceProjectId = resolvedSource.projectId;
+      const targetProjectId = resolvedTarget.projectId;
+      const [source, target] = await Promise.all([
+        fetchReadableProject(sourceProjectId),
+        assertProjectOwnershipAndGame(targetProjectId, game),
+      ]);
+      if (String(source.manifest.gameId ?? "") !== expectedGameId(game)) {
+        return invalidParams(`Le projet source est ${String(source.manifest.gameId ?? "inconnu")}, pas ${expectedGameId(game)}.`, {
+          sourceProjectId,
+          game,
+        });
+      }
+
+      const sourceOverrides = getLootOverrides(source.v7data, game);
+      const familyMatch = findLootFamily(sourceOverrides, family);
+      if (!familyMatch) {
+        return invalidParams("Famille loot introuvable dans le projet source.", {
+          sourceProjectId,
+          family,
+        });
+      }
+
+      const copiedOverrides = familyMatch.overrides.map((override) => deepCloneJson(override));
+      const nextOverrides = getLootOverrides(target.v7data, game).map((override) => deepCloneJson(override));
+      for (const override of copiedOverrides) {
+        const identity = lootDropIdentity(override);
+        const index = findOverrideIndex(nextOverrides, {
+          lootDropId: identity.blueprintId,
+          lootDropClassString: identity.classString,
+        });
+        if (index >= 0) {
+          if (replaceExistingResult.value ?? true) {
+            nextOverrides[index] = override;
+          }
+        } else {
+          nextOverrides.push(override);
+        }
+      }
+
+      setLootOverrides(target.v7data, game, nextOverrides);
+      const enabledContentPackIds = mergeRequiredContentPacks(target.manifest, copiedOverrides);
+      let backup: { path: string; sha256: string } | undefined;
+      if (backupLocalResult.value ?? true) {
+        backup = await writeProjectBackup(targetProjectId, target.binary);
+      }
+
+      const saveMeta = await saveProjectBinary(target.manifest, target.v7data);
+      const confirmation = await assertProjectOwnershipAndGame(targetProjectId, game);
+
+      return textResult(
+        [
+          `Famille loot copiée vers ${targetProjectId}.`,
+          `Source : ${sourceProjectId}`,
+          `Famille : ${familyMatch.familyKey}`,
+          `Overrides copiés : ${copiedOverrides.length}`,
+          ...(backup ? [`Backup : ${backup.path}`] : []),
+        ].join("\n"),
+        {
+          sourceProjectId,
+          targetProjectId,
+          game,
+          family: familyMatch.familyKey,
+          copiedOverrides: copiedOverrides.map((override) => summarizeLootOverride(override)),
+          enabledContentPackIds,
+          backup,
+          revision: saveMeta.revision,
+          confirmedOverrideCount: getLootOverrides(confirmation.v7data, game).length,
+        },
+        {
+          sourceProjectId,
+          targetProjectId,
+          game,
+          family: familyMatch.familyKey,
+          copiedCount: copiedOverrides.length,
+        }
+      );
+    } catch (err) {
+      return formatApiError(err);
+    }
+  },
+};
+
+// ---- beacon_set_loot_override ----
+
+const setLootOverrideTool: ToolDefinition = {
+  name: "beacon_set_loot_override",
+  description:
+    "Ajoute ou remplace un override loot natif Beacon dans un projet. " +
+    "Accepte un payload override Beacon complet, fusionne les mods requis, sauvegarde puis relit le projet.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      projectId: { type: "string", description: "ID UUID du projet Beacon" },
+      projectName: { type: "string", description: "Nom du projet Beacon si l'UUID n'est pas connu" },
+      game: {
+        type: "string",
+        enum: [...PROJECT_GAMES],
+        description: "Jeu cible : 'ark' ou 'arksa'",
+      },
+      override: {
+        type: "object",
+        description: "Payload native override Beacon (definition, minItemSets, maxItemSets, sets...)",
+      },
+      lootDropId: {
+        type: "string",
+        description: "BlueprintId du loot drop à remplacer (optionnel si présent dans override.definition)",
+      },
+      lootDropClassString: {
+        type: "string",
+        description: "Class string du loot drop à remplacer (optionnel si présent dans override.definition)",
+      },
+      backupLocal: {
+        type: "boolean",
+        description: "Créer une sauvegarde locale du projet avant écriture. Défaut : true",
+      },
+      enableRequiredMods: {
+        type: "boolean",
+        description: "Active automatiquement les mods requis par l'override. Défaut : true",
+      },
+    },
+    required: ["game", "override"],
+  },
+  handler: async (args) => {
+    const projectIdResult = optionalString(args, "projectId");
+    if (!projectIdResult.ok) return projectIdResult.result;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
+    const gameResult = requireGame(args, "game", PROJECT_GAMES);
+    if (!gameResult.ok) return gameResult.result;
+    const overrideResult = optionalRecord(args, "override");
+    if (!overrideResult.ok) return overrideResult.result;
+    if (!overrideResult.value) {
+      return invalidParams("Paramètre override requis.", { field: "override" });
+    }
+    const lootDropIdResult = optionalString(args, "lootDropId");
+    if (!lootDropIdResult.ok) return lootDropIdResult.result;
+    const lootDropClassStringResult = optionalString(args, "lootDropClassString");
+    if (!lootDropClassStringResult.ok) return lootDropClassStringResult.result;
+    const backupLocalResult = optionalBoolean(args, "backupLocal", true);
+    if (!backupLocalResult.ok) return backupLocalResult.result;
+    const enableRequiredModsResult = optionalBoolean(args, "enableRequiredMods", true);
+    if (!enableRequiredModsResult.ok) return enableRequiredModsResult.result;
+
+    const game = gameResult.value as ProjectGame;
+    const candidateOverride = deepCloneJson(overrideResult.value);
+    const validation = validateLootOverrideRecord(candidateOverride);
+    if (!validation.ok) {
+      return invalidParams(validation.message, { field: "override" });
+    }
+
+    const identity = lootDropIdentity(candidateOverride);
+    const matcher = {
+      lootDropId: lootDropIdResult.value ?? identity.blueprintId,
+      lootDropClassString: lootDropClassStringResult.value ?? identity.classString,
+    };
+    if (!matcher.lootDropId && !matcher.lootDropClassString) {
+      return invalidParams("lootDropId ou lootDropClassString requis pour identifier l'override cible.", {
+        fields: ["lootDropId", "lootDropClassString"],
+      });
+    }
+
+    try {
+      const resolvedProject = await resolveProjectReference({
+        projectId: projectIdResult.value,
+        projectName: projectNameResult.value,
+      }, { game });
+      if (!resolvedProject.ok) return resolvedProject.result;
+      const projectId = resolvedProject.projectId;
+      const target = await assertProjectOwnershipAndGame(projectId, game);
+      const nextOverrides = getLootOverrides(target.v7data, game).map((override) => deepCloneJson(override));
+      const index = findOverrideIndex(nextOverrides, matcher);
+      if (index >= 0) {
+        nextOverrides[index] = candidateOverride;
+      } else {
+        nextOverrides.push(candidateOverride);
+      }
+
+      setLootOverrides(target.v7data, game, nextOverrides);
+      const enabledContentPackIds =
+        enableRequiredModsResult.value ?? true
+          ? mergeRequiredContentPacks(target.manifest, [candidateOverride])
+          : [];
+
+      let backup: { path: string; sha256: string } | undefined;
+      if (backupLocalResult.value ?? true) {
+        backup = await writeProjectBackup(projectId, target.binary);
+      }
+
+      const saveMeta = await saveProjectBinary(target.manifest, target.v7data);
+      const confirmation = await assertProjectOwnershipAndGame(projectId, game);
+      const confirmedIndex = findOverrideIndex(getLootOverrides(confirmation.v7data, game), matcher);
+
+      return textResult(
+        [
+          `Override loot enregistré dans ${projectId}.`,
+          `Loot drop : ${identity.label || identity.classString || identity.blueprintId}`,
+          `Mode : ${index >= 0 ? "remplacement" : "ajout"}`,
+          ...(backup ? [`Backup : ${backup.path}`] : []),
+        ].join("\n"),
+        {
+          projectId,
+          game,
+          override: summarizeLootOverride(candidateOverride),
+          enabledContentPackIds,
+          backup,
+          revision: saveMeta.revision,
+          confirmed: confirmedIndex >= 0,
+        },
+        {
+          projectId,
+          game,
+          lootDropId: matcher.lootDropId,
+          lootDropClassString: matcher.lootDropClassString,
+        }
+      );
+    } catch (err) {
+      return formatApiError(err);
+    }
+  },
+};
+
 // ---- beacon_export_project_code ----
 
 const exportProjectCodeTool: ToolDefinition = {
@@ -1047,10 +2319,17 @@ const exportProjectCodeTool: ToolDefinition = {
     type: "object",
     properties: {
       projectId: { type: "string", description: "ID du projet" },
+      projectName: { type: "string", description: "Nom du projet si l'ID n'est pas connu" },
       game: {
         type: "string",
         enum: [...PROJECT_GAMES],
         description: "Jeu cible : 'ark' ou 'arksa'",
+      },
+      format: {
+        type: "string",
+        enum: ["full", "overrides_only"],
+        description:
+          "Choisir 'full' pour le rendu complet, ou 'overrides_only' pour ne retourner que les lignes utiles comme OverrideNamedEngramEntries. Défaut : full",
       },
       file: {
         type: "string",
@@ -1070,13 +2349,17 @@ const exportProjectCodeTool: ToolDefinition = {
         description: "Masque de carte optionnel pour générer l'export ciblé",
       },
     },
-    required: ["projectId", "game"],
+    required: ["game"],
   },
   handler: async (args) => {
-    const projectIdResult = requireString(args, "projectId");
+    const projectIdResult = optionalString(args, "projectId");
     if (!projectIdResult.ok) return projectIdResult.result;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
     const gameResult = requireGame(args, "game", PROJECT_GAMES);
     if (!gameResult.ok) return gameResult.result;
+    const formatResult = optionalString(args, "format");
+    if (!formatResult.ok) return formatResult.result;
     const fileResult = optionalString(args, "file");
     if (!fileResult.ok) return fileResult.result;
     const qualityScaleResult = optionalNumber(args, "qualityScale");
@@ -1086,10 +2369,17 @@ const exportProjectCodeTool: ToolDefinition = {
     const mapMaskResult = optionalString(args, "mapMask");
     if (!mapMaskResult.ok) return mapMaskResult.result;
 
-    const projectId = projectIdResult.value;
     const game = gameResult.value as ProjectGame;
+    const format = (formatResult.value ?? "full").toLowerCase();
     const file = (fileResult.value ?? "all").toLowerCase();
+    const allowedFormats = ["full", "overrides_only"] as const;
     const allowedFiles = ["all", "game", "gus"] as const;
+    if (!allowedFormats.includes(format as (typeof allowedFormats)[number])) {
+      return invalidParams("Paramètre format invalide. Valeurs acceptées : full, overrides_only.", {
+        field: "format",
+        acceptedValues: allowedFormats,
+      });
+    }
     if (!allowedFiles.includes(file as (typeof allowedFiles)[number])) {
       return invalidParams("Paramètre file invalide. Valeurs acceptées : all, game, gus.", {
         field: "file",
@@ -1098,6 +2388,12 @@ const exportProjectCodeTool: ToolDefinition = {
     }
 
     try {
+      const resolvedProject = await resolveProjectReference({
+        projectId: projectIdResult.value,
+        projectName: projectNameResult.value,
+      }, { game });
+      if (!resolvedProject.ok) return resolvedProject.result;
+      const projectId = resolvedProject.projectId;
       const params = buildConfigParams(
         qualityScaleResult.value,
         difficultyValueResult.value,
@@ -1109,40 +2405,22 @@ const exportProjectCodeTool: ToolDefinition = {
         file as "all" | "game" | "gus",
         params
       );
-      const { gameIni, gameUserSettingsIni, derivedGameIniLines } = exportBundle;
-      const includeGus = file === "all" || file === "gus";
-
-      const sections: string[] = [];
-      if (gameIni !== undefined) {
-        sections.push(["[Game.ini]", "```ini", gameIni, "```"].join("\n"));
-      }
-      if (gameUserSettingsIni !== undefined) {
-        sections.push(["[GameUserSettings.ini]", "```ini", gameUserSettingsIni, "```"].join("\n"));
-      } else if (includeGus && file === "all") {
-        sections.push(
-          "[GameUserSettings.ini]\n```text\nNon disponible via l'API Beacon pour ce projet.\n```"
-        );
-      }
+      const exportView = buildProjectChatExport(
+        projectId,
+        game,
+        file as "all" | "game" | "gus",
+        format as ExportFormat,
+        exportBundle
+      );
 
       return textResult(
-        `Export de configuration pour ${gameName(game)} (projet ${projectId}) :\n\n${sections.join("\n\n")}`,
-        {
-          projectId,
-          game,
-          derivedGameIniLines,
-          files: {
-            ...(gameIni !== undefined ? { "Game.ini": gameIni } : {}),
-            ...(gameUserSettingsIni !== undefined
-              ? { "GameUserSettings.ini": gameUserSettingsIni }
-              : includeGus && file === "all"
-              ? { "GameUserSettings.ini": null }
-              : {}),
-          },
-        },
+        exportView.message,
+        exportView.payload,
         {
           projectId,
           game,
           file,
+          format,
           mapMask: mapMaskResult.value,
         }
       );
@@ -1164,10 +2442,17 @@ const exportProjectFileTool: ToolDefinition = {
     type: "object",
     properties: {
       projectId: { type: "string", description: "ID du projet" },
+      projectName: { type: "string", description: "Nom du projet si l'ID n'est pas connu" },
       game: {
         type: "string",
         enum: [...PROJECT_GAMES],
         description: "Jeu cible : 'ark' ou 'arksa'",
+      },
+      format: {
+        type: "string",
+        enum: ["full", "overrides_only"],
+        description:
+          "Choisir 'full' pour le rendu complet, ou 'overrides_only' pour n'écrire que les lignes utiles comme OverrideNamedEngramEntries. Défaut : full",
       },
       file: {
         type: "string",
@@ -1186,18 +2471,18 @@ const exportProjectFileTool: ToolDefinition = {
         type: "string",
         description: "Masque de carte optionnel pour générer l'export ciblé",
       },
-      projectName: {
-        type: "string",
-        description: "Nom du projet pour construire un nom de fichier plus lisible (optionnel)",
-      },
     },
-    required: ["projectId", "game"],
+    required: ["game"],
   },
   handler: async (args) => {
-    const projectIdResult = requireString(args, "projectId");
+    const projectIdResult = optionalString(args, "projectId");
     if (!projectIdResult.ok) return projectIdResult.result;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
     const gameResult = requireGame(args, "game", PROJECT_GAMES);
     if (!gameResult.ok) return gameResult.result;
+    const formatResult = optionalString(args, "format");
+    if (!formatResult.ok) return formatResult.result;
     const fileResult = optionalString(args, "file");
     if (!fileResult.ok) return fileResult.result;
     const qualityScaleResult = optionalNumber(args, "qualityScale");
@@ -1206,13 +2491,18 @@ const exportProjectFileTool: ToolDefinition = {
     if (!difficultyValueResult.ok) return difficultyValueResult.result;
     const mapMaskResult = optionalString(args, "mapMask");
     if (!mapMaskResult.ok) return mapMaskResult.result;
-    const projectNameResult = optionalString(args, "projectName");
-    if (!projectNameResult.ok) return projectNameResult.result;
 
-    const projectId = projectIdResult.value;
     const game = gameResult.value as ProjectGame;
+    const format = (formatResult.value ?? "full").toLowerCase();
     const file = (fileResult.value ?? "all").toLowerCase();
+    const allowedFormats = ["full", "overrides_only"] as const;
     const allowedFiles = ["all", "game", "gus"] as const;
+    if (!allowedFormats.includes(format as (typeof allowedFormats)[number])) {
+      return invalidParams("Paramètre format invalide. Valeurs acceptées : full, overrides_only.", {
+        field: "format",
+        acceptedValues: allowedFormats,
+      });
+    }
     if (!allowedFiles.includes(file as (typeof allowedFiles)[number])) {
       return invalidParams("Paramètre file invalide. Valeurs acceptées : all, game, gus.", {
         field: "file",
@@ -1221,6 +2511,12 @@ const exportProjectFileTool: ToolDefinition = {
     }
 
     try {
+      const resolvedProject = await resolveProjectReference({
+        projectId: projectIdResult.value,
+        projectName: projectNameResult.value,
+      }, { game });
+      if (!resolvedProject.ok) return resolvedProject.result;
+      const projectId = resolvedProject.projectId;
       const params = buildConfigParams(
         qualityScaleResult.value,
         difficultyValueResult.value,
@@ -1232,38 +2528,24 @@ const exportProjectFileTool: ToolDefinition = {
         file as "all" | "game" | "gus",
         params
       );
-      const { gameIni, gameUserSettingsIni, derivedGameIniLines } = exportBundle;
-      const includeGus = file === "all" || file === "gus";
-
       const projectName = projectNameResult.value ?? projectId;
-      const lines = [
-        `Project: ${projectName}`,
-        `Project ID: ${projectId}`,
-        `Game: ${gameName(game)}`,
-        ...(mapMaskResult.value ? [`Map Mask: ${mapMaskResult.value}`] : []),
-        "",
-      ];
-
-      if (gameIni !== undefined) {
-        lines.push("===== Game.ini =====", gameIni, "");
-      }
-      if (gameUserSettingsIni !== undefined) {
-        lines.push("===== GameUserSettings.ini =====", gameUserSettingsIni, "");
-      } else if (includeGus && file === "all") {
-        lines.push(
-          "===== GameUserSettings.ini =====",
-          "Non disponible via l'API Beacon pour ce projet.",
-          ""
-        );
-      }
+      const fileExport = buildProjectFileExport(
+        projectId,
+        projectName,
+        game,
+        file as "all" | "game" | "gus",
+        mapMaskResult.value,
+        format as ExportFormat,
+        exportBundle
+      );
 
       const filename = [
         sanitizeFileSegment(projectName) || "beacon-project",
-        sanitizeFileSegment(file),
+        sanitizeFileSegment(format === "overrides_only" ? "overrides" : file),
         createTimestampSlug(),
       ].join("-") + ".txt";
 
-      const exportPath = await writeProjectExportFile(filename, lines.join("\n"));
+      const exportPath = await writeProjectExportFile(filename, fileExport.content);
 
       return textResult(
         [
@@ -1276,22 +2558,208 @@ const exportProjectFileTool: ToolDefinition = {
           projectName,
           game,
           file,
+          format,
           exportPath,
-          derivedGameIniLines,
-          exportedFiles: {
-            ...(gameIni !== undefined ? { "Game.ini": true } : {}),
-            ...(gameUserSettingsIni !== undefined
-              ? { "GameUserSettings.ini": true }
-              : includeGus && file === "all"
-              ? { "GameUserSettings.ini": false }
-              : {}),
-          },
+          derivedGameIniLines: exportBundle.derivedGameIniLines,
+          exportedFiles: fileExport.exportedFiles,
         },
         {
           projectId,
           game,
           file,
+          format,
           exportPath,
+        }
+      );
+    } catch (err) {
+      return formatApiError(err);
+    }
+  },
+};
+
+// ---- beacon_export_project_smart ----
+
+const SMART_EXPORT_DEFAULT_CHAR_LIMIT = 12000;
+
+const exportProjectSmartTool: ToolDefinition = {
+  name: "beacon_export_project_smart",
+  description:
+    "Exporte intelligemment la configuration d'un projet Beacon. " +
+    "Si le rendu est court, il le retourne directement dans le chat. " +
+    "Si le rendu devient trop long, il bascule automatiquement vers un fichier local dans ~/.beacon-mcp/exports/.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      projectId: { type: "string", description: "ID du projet" },
+      projectName: { type: "string", description: "Nom du projet si l'ID n'est pas connu" },
+      game: {
+        type: "string",
+        enum: [...PROJECT_GAMES],
+        description: "Jeu cible : 'ark' ou 'arksa'",
+      },
+      format: {
+        type: "string",
+        enum: ["full", "overrides_only"],
+        description:
+          "Choisir 'full' pour le rendu complet, ou 'overrides_only' pour seulement les lignes utiles. Défaut : full",
+      },
+      file: {
+        type: "string",
+        enum: ["all", "game", "gus"],
+        description: "Choisir 'all', 'game' pour Game.ini, ou 'gus' pour GameUserSettings.ini. Défaut : all",
+      },
+      qualityScale: {
+        type: "number",
+        description: "Multiplicateur de qualité des items pour la génération Game.ini (optionnel)",
+      },
+      difficultyValue: {
+        type: "number",
+        description: "Valeur de difficulté pour la génération Game.ini (optionnel)",
+      },
+      mapMask: {
+        type: "string",
+        description: "Masque de carte optionnel pour générer l'export ciblé",
+      },
+      maxInlineChars: {
+        type: "number",
+        description:
+          "Nombre maximum de caractères à retourner directement dans le chat avant bascule vers un fichier. Défaut : 12000",
+      },
+    },
+    required: ["game"],
+  },
+  handler: async (args) => {
+    const projectIdResult = optionalString(args, "projectId");
+    if (!projectIdResult.ok) return projectIdResult.result;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
+    const gameResult = requireGame(args, "game", PROJECT_GAMES);
+    if (!gameResult.ok) return gameResult.result;
+    const formatResult = optionalString(args, "format");
+    if (!formatResult.ok) return formatResult.result;
+    const fileResult = optionalString(args, "file");
+    if (!fileResult.ok) return fileResult.result;
+    const qualityScaleResult = optionalNumber(args, "qualityScale");
+    if (!qualityScaleResult.ok) return qualityScaleResult.result;
+    const difficultyValueResult = optionalNumber(args, "difficultyValue");
+    if (!difficultyValueResult.ok) return difficultyValueResult.result;
+    const mapMaskResult = optionalString(args, "mapMask");
+    if (!mapMaskResult.ok) return mapMaskResult.result;
+    const maxInlineCharsResult = optionalNumber(args, "maxInlineChars");
+    if (!maxInlineCharsResult.ok) return maxInlineCharsResult.result;
+
+    const game = gameResult.value as ProjectGame;
+    const format = (formatResult.value ?? "full").toLowerCase();
+    const file = (fileResult.value ?? "all").toLowerCase();
+    const maxInlineChars = Math.max(
+      200,
+      Math.floor(maxInlineCharsResult.value ?? SMART_EXPORT_DEFAULT_CHAR_LIMIT)
+    );
+    const allowedFormats = ["full", "overrides_only"] as const;
+    const allowedFiles = ["all", "game", "gus"] as const;
+    if (!allowedFormats.includes(format as (typeof allowedFormats)[number])) {
+      return invalidParams("Paramètre format invalide. Valeurs acceptées : full, overrides_only.", {
+        field: "format",
+        acceptedValues: allowedFormats,
+      });
+    }
+    if (!allowedFiles.includes(file as (typeof allowedFiles)[number])) {
+      return invalidParams("Paramètre file invalide. Valeurs acceptées : all, game, gus.", {
+        field: "file",
+        acceptedValues: allowedFiles,
+      });
+    }
+
+    try {
+      const resolvedProject = await resolveProjectReference({
+        projectId: projectIdResult.value,
+        projectName: projectNameResult.value,
+      }, { game });
+      if (!resolvedProject.ok) return resolvedProject.result;
+      const projectId = resolvedProject.projectId;
+      const params = buildConfigParams(
+        qualityScaleResult.value,
+        difficultyValueResult.value,
+        mapMaskResult.value
+      );
+      const exportBundle = await buildEffectiveProjectExport(
+        projectId,
+        game,
+        file as "all" | "game" | "gus",
+        params
+      );
+      const chatExport = buildProjectChatExport(
+        projectId,
+        game,
+        file as "all" | "game" | "gus",
+        format as ExportFormat,
+        exportBundle
+      );
+
+      if (chatExport.message.length <= maxInlineChars) {
+        return textResult(
+          chatExport.message,
+          {
+            ...chatExport.payload,
+            delivery: "inline",
+            maxInlineChars,
+          },
+          {
+            projectId,
+            game,
+            file,
+            format,
+            delivery: "inline",
+            maxInlineChars,
+          }
+        );
+      }
+
+      const projectName = projectNameResult.value ?? projectId;
+      const fileExport = buildProjectFileExport(
+        projectId,
+        projectName,
+        game,
+        file as "all" | "game" | "gus",
+        mapMaskResult.value,
+        format as ExportFormat,
+        exportBundle
+      );
+
+      const filename = [
+        sanitizeFileSegment(projectName) || "beacon-project",
+        sanitizeFileSegment(format === "overrides_only" ? "overrides" : file),
+        createTimestampSlug(),
+      ].join("-") + ".txt";
+
+      const exportPath = await writeProjectExportFile(filename, fileExport.content);
+
+      return textResult(
+        [
+          `Export trop volumineux pour le chat, fichier local créé pour ${gameName(game)}.`,
+          `Projet : ${projectName} (${projectId})`,
+          `Fichier : ${exportPath}`,
+        ].join("\n"),
+        {
+          projectId,
+          projectName,
+          game,
+          file,
+          format,
+          delivery: "file",
+          exportPath,
+          maxInlineChars,
+          derivedGameIniLines: exportBundle.derivedGameIniLines,
+          exportedFiles: fileExport.exportedFiles,
+        },
+        {
+          projectId,
+          game,
+          file,
+          format,
+          delivery: "file",
+          exportPath,
+          maxInlineChars,
         }
       );
     } catch (err) {
@@ -1313,6 +2781,7 @@ const generateGameIniTool: ToolDefinition = {
     type: "object",
     properties: {
       projectId: { type: "string", description: "ID du projet" },
+      projectName: { type: "string", description: "Nom du projet si l'ID n'est pas connu" },
       game: {
         type: "string",
         enum: [...PROJECT_GAMES],
@@ -1331,11 +2800,13 @@ const generateGameIniTool: ToolDefinition = {
         description: "Masque de carte (optionnel)",
       },
     },
-    required: ["projectId", "game"],
+    required: ["game"],
   },
   handler: async (args) => {
-    const projectIdResult = requireString(args, "projectId");
+    const projectIdResult = optionalString(args, "projectId");
     if (!projectIdResult.ok) return projectIdResult.result;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
     const gameResult = requireGame(args, "game", PROJECT_GAMES);
     if (!gameResult.ok) return gameResult.result;
     const qualityScaleResult = optionalNumber(args, "qualityScale");
@@ -1345,12 +2816,17 @@ const generateGameIniTool: ToolDefinition = {
     const mapMaskResult = optionalString(args, "mapMask");
     if (!mapMaskResult.ok) return mapMaskResult.result;
 
-    const projectId = projectIdResult.value;
     const game = gameResult.value as (typeof PROJECT_GAMES)[number];
     const qualityScale = qualityScaleResult.value;
     const difficultyValue = difficultyValueResult.value;
     const mapMask = mapMaskResult.value;
     try {
+      const resolvedProject = await resolveProjectReference({
+        projectId: projectIdResult.value,
+        projectName: projectNameResult.value,
+      });
+      if (!resolvedProject.ok) return resolvedProject.result;
+      const projectId = resolvedProject.projectId;
       const params = buildConfigParams(qualityScale, difficultyValue, mapMask);
 
       const ini = await getProjectConfigFile(projectId, game, "Game.ini", params);
@@ -1379,6 +2855,7 @@ const putGameIniTool: ToolDefinition = {
     type: "object",
     properties: {
       projectId: { type: "string", description: "ID du projet" },
+      projectName: { type: "string", description: "Nom du projet si l'ID n'est pas connu" },
       game: {
         type: "string",
         enum: [...PROJECT_GAMES],
@@ -1389,20 +2866,27 @@ const putGameIniTool: ToolDefinition = {
         description: "Contenu complet du fichier Game.ini (texte brut INI)",
       },
     },
-    required: ["projectId", "game", "content"],
+    required: ["game", "content"],
   },
   handler: async (args) => {
-    const projectIdResult = requireString(args, "projectId");
+    const projectIdResult = optionalString(args, "projectId");
     if (!projectIdResult.ok) return projectIdResult.result;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
     const gameResult = requireGame(args, "game", PROJECT_GAMES);
     if (!gameResult.ok) return gameResult.result;
     const contentResult = requireRawString(args, "content", "content");
     if (!contentResult.ok) return contentResult.result;
 
-    const projectId = projectIdResult.value;
     const game = gameResult.value as (typeof PROJECT_GAMES)[number];
     const content = contentResult.value;
     try {
+      const resolvedProject = await resolveProjectReference({
+        projectId: projectIdResult.value,
+        projectName: projectNameResult.value,
+      });
+      if (!resolvedProject.ok) return resolvedProject.result;
+      const projectId = resolvedProject.projectId;
       await putProjectConfigFile(projectId, game, "Game.ini", content);
       return textResult(
         `Game.ini mis à jour avec succès pour le projet ${projectId} (${gameName(game)}).`,
@@ -1426,23 +2910,31 @@ const generateGameUserSettingsIniTool: ToolDefinition = {
     type: "object",
     properties: {
       projectId: { type: "string", description: "ID du projet" },
+      projectName: { type: "string", description: "Nom du projet si l'ID n'est pas connu" },
       game: {
         type: "string",
         enum: [...PROJECT_GAMES],
         description: "Jeu cible : 'ark' ou 'arksa'",
       },
     },
-    required: ["projectId", "game"],
+    required: ["game"],
   },
   handler: async (args) => {
-    const projectIdResult = requireString(args, "projectId");
+    const projectIdResult = optionalString(args, "projectId");
     if (!projectIdResult.ok) return projectIdResult.result;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
     const gameResult = requireGame(args, "game", PROJECT_GAMES);
     if (!gameResult.ok) return gameResult.result;
 
-    const projectId = projectIdResult.value;
     const game = gameResult.value as (typeof PROJECT_GAMES)[number];
     try {
+      const resolvedProject = await resolveProjectReference({
+        projectId: projectIdResult.value,
+        projectName: projectNameResult.value,
+      });
+      if (!resolvedProject.ok) return resolvedProject.result;
+      const projectId = resolvedProject.projectId;
       const ini = await getProjectConfigFile(projectId, game, "GameUserSettings.ini");
       return textResult(
         `GameUserSettings.ini — ${gameName(game)} (projet ${projectId}) :\n\n${ini}`,
@@ -1472,6 +2964,7 @@ const putGameUserSettingsIniTool: ToolDefinition = {
     type: "object",
     properties: {
       projectId: { type: "string", description: "ID du projet" },
+      projectName: { type: "string", description: "Nom du projet si l'ID n'est pas connu" },
       game: {
         type: "string",
         enum: [...CONFIG_OPTION_GAMES],
@@ -1482,20 +2975,27 @@ const putGameUserSettingsIniTool: ToolDefinition = {
         description: "Contenu complet du fichier GameUserSettings.ini (texte brut INI)",
       },
     },
-    required: ["projectId", "game", "content"],
+    required: ["game", "content"],
   },
   handler: async (args) => {
-    const projectIdResult = requireString(args, "projectId");
+    const projectIdResult = optionalString(args, "projectId");
     if (!projectIdResult.ok) return projectIdResult.result;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
     const gameResult = requireGame(args, "game", PROJECT_GAMES);
     if (!gameResult.ok) return gameResult.result;
     const contentResult = requireRawString(args, "content", "content");
     if (!contentResult.ok) return contentResult.result;
 
-    const projectId = projectIdResult.value;
     const game = gameResult.value as (typeof PROJECT_GAMES)[number];
     const content = contentResult.value;
     try {
+      const resolvedProject = await resolveProjectReference({
+        projectId: projectIdResult.value,
+        projectName: projectNameResult.value,
+      });
+      if (!resolvedProject.ok) return resolvedProject.result;
+      const projectId = resolvedProject.projectId;
       await putProjectConfigFile(projectId, game, "GameUserSettings.ini", content);
       return textResult(
         `GameUserSettings.ini mis à jour avec succès pour le projet ${projectId} (${gameName(game)}).`,
@@ -1676,12 +3176,18 @@ const listCommandLineOptionsTool: ToolDefinition = {
 export function registerProjectTools(server: McpServer): void {
   registerToolGroup(server, [
     listProjectsTool,
+    findProjectTool,
     getProjectTool,
     createProjectTool,
     setProjectModTool,
     setEngramUnlockTool,
+    inspectLootProjectTool,
+    copyLootOverridesTool,
+    copyLootFamilyTool,
+    setLootOverrideTool,
     exportProjectCodeTool,
     exportProjectFileTool,
+    exportProjectSmartTool,
     generateGameIniTool,
     putGameIniTool,
     generateGameUserSettingsIniTool,

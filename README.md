@@ -36,8 +36,10 @@ The MCP itself is functional and already includes:
 - project creation with a basic map mask
 - safe project mod activation/deactivation
 - safe engram unlock overrides
+- native loot project inspection and copy tools
 - direct chat export for project code
 - local file export for large project code
+- smart export that chooses chat or local file automatically
 - `Game.ini` read/write
 - `GameUserSettings.ini` read/write
 - config option listing
@@ -167,8 +169,13 @@ The MCP now includes guarded project editing tools for common Beacon workflows:
 
 - `beacon_set_project_mod` activates or disables a mod in a project without overwriting the other configured mods.
 - `beacon_set_engram_unlock` adds or updates an engram override, for example unlocking `CS Tek Forge` at level `180`.
-- `beacon_export_project_code` returns `Game.ini`, `GameUserSettings.ini`, or both directly in the assistant chat.
+- `beacon_inspect_loot_project` reads the native Beacon loot structure of a project and summarizes overrides, reusable families, sets, and item pools.
+- `beacon_copy_loot_overrides` copies selected loot overrides from one project to another while merging the required content packs.
+- `beacon_copy_loot_family` copies a whole reusable loot family from a source project into a target project.
+- `beacon_set_loot_override` writes a native Beacon loot override payload directly into a project.
+- `beacon_export_project_code` returns `Game.ini`, `GameUserSettings.ini`, or only useful override lines directly in the assistant chat.
 - `beacon_export_project_file` writes the exported config to a local `.txt` file when the output is too large for a comfortable chat response.
+- `beacon_export_project_smart` chooses automatically between inline chat output and a local `.txt` export depending on the output size.
 
 These tools are designed to be used through an assistant conversation rather than as blind writes. A good assistant flow is:
 
@@ -204,22 +211,66 @@ Large local exports are written to:
 ~/.beacon-mcp/exports/
 ```
 
+Project targeting is now simpler for non-technical users:
+
+- most project tools accept `projectName` instead of `projectId`
+- source/target loot copy tools also accept `sourceProjectName` and `targetProjectName`
+- `beacon_find_project` can search by partial name before any write or export step
+- if multiple projects have the same or a very similar name, the MCP returns a clarification error listing the matching IDs
+- if the name is unique for the connected user, the MCP resolves it automatically
+
+Recommended assistant behavior for natural requests:
+
+- if the user says "inspecte mon projet loot Astraeos", first call `beacon_find_project query="loot Astraeos"`
+- if there is one clear result, continue with `projectName`
+- if there are several close results, ask the user which displayed project name is the right one
+- only fall back to `projectId` when two projects are genuinely ambiguous
+
 Example workflow for Cybers Structures QoL+ Tek Forge:
 
 ```text
+Call beacon_find_project query="test 180" game="arksa"
 Call beacon_search_mods game="arksa" query="Cybers Structures QoL+"
 Call beacon_list_engrams game="arksa" filter="tek forge" contentPackId="<contentPackId>"
 Call beacon_create_project game="arksa" name="test 180" mapMask=1
-Call beacon_set_project_mod game="arksa" projectId="<projectId>" contentPackId="<contentPackId>"
-Call beacon_set_engram_unlock game="arksa" projectId="<projectId>" engramId="<engramId>" level=180
+Call beacon_set_project_mod game="arksa" projectName="test 180" contentPackId="<contentPackId>"
+Call beacon_set_engram_unlock game="arksa" projectName="test 180" engramId="<engramId>" level=180
 ```
 
 Example export requests:
 
 ```text
-Call beacon_export_project_code projectId="<projectId>" game="arksa"
-Call beacon_export_project_file projectId="<projectId>" game="arksa" file="all" projectName="test tek forge 180"
+Call beacon_export_project_code projectName="test tek forge 180" game="arksa"
+Call beacon_export_project_code projectName="test tek forge 180" game="arksa" format="overrides_only"
+Call beacon_export_project_file projectName="test tek forge 180" game="arksa" file="all"
+Call beacon_export_project_smart projectName="test tek forge 180" game="arksa" format="overrides_only"
 ```
+
+Example direct INI workflow by project name:
+
+```text
+Call beacon_generate_game_ini projectName="test tek forge 180" game="arksa"
+Call beacon_put_game_ini projectName="test tek forge 180" game="arksa" content="..."
+Call beacon_generate_game_user_settings_ini projectName="test tek forge 180" game="arksa"
+Call beacon_put_game_user_settings_ini projectName="test tek forge 180" game="arksa" content="..."
+```
+
+Example native loot workflow:
+
+```text
+Call beacon_find_project query="Loot Aérien Astraeos" game="arksa"
+Call beacon_inspect_loot_project projectName="[ARCHIVE] LOOTS /// RILINDRA Loot Aérien Astraeos [EXTRAIT]" game="arksa"
+Call beacon_copy_loot_family sourceProjectName="[ARCHIVE] LOOTS /// RILINDRA Loot Aérien Astraeos [EXTRAIT]" targetProjectName="My Astraeos Loot Test" game="arksa" family="Astraeos Blue"
+Call beacon_copy_loot_overrides sourceProjectName="[ARCHIVE] LOOTS /// RILINDRA Loot Aérien Astraeos [EXTRAIT]" targetProjectName="My Astraeos Loot Test" game="arksa" lootDropClassStrings=["SupplyCrate_Level60_Astraeos_C"]
+Call beacon_set_loot_override projectName="My Astraeos Loot Test" game="arksa" override="{...payload Beacon...}"
+```
+
+Recommended export behavior:
+
+- use `beacon_export_project_code` when you want a short result directly in chat
+- use `format="overrides_only"` when only lines such as `OverrideNamedEngramEntries` matter
+- use `beacon_export_project_file` when you explicitly want a local file
+- use `beacon_export_project_smart` when you want the MCP to choose automatically between inline output and a `.txt` export
 
 ---
 
@@ -272,12 +323,18 @@ Call beacon_list_projects
 ### Projects and Configuration
 
 - `beacon_list_projects`
+- `beacon_find_project`
 - `beacon_get_project`
 - `beacon_create_project`
 - `beacon_set_project_mod`
 - `beacon_set_engram_unlock`
+- `beacon_inspect_loot_project`
+- `beacon_copy_loot_overrides`
+- `beacon_copy_loot_family`
+- `beacon_set_loot_override`
 - `beacon_export_project_code`
 - `beacon_export_project_file`
+- `beacon_export_project_smart`
 - `beacon_generate_game_ini`
 - `beacon_put_game_ini`
 - `beacon_generate_game_user_settings_ini`
