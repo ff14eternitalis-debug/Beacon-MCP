@@ -36,6 +36,8 @@ The MCP itself is functional and already includes:
 - project creation with a basic map mask
 - safe project mod activation/deactivation
 - safe engram unlock overrides
+- direct chat export for project code
+- local file export for large project code
 - `Game.ini` read/write
 - `GameUserSettings.ini` read/write
 - config option listing
@@ -165,6 +167,8 @@ The MCP now includes guarded project editing tools for common Beacon workflows:
 
 - `beacon_set_project_mod` activates or disables a mod in a project without overwriting the other configured mods.
 - `beacon_set_engram_unlock` adds or updates an engram override, for example unlocking `CS Tek Forge` at level `180`.
+- `beacon_export_project_code` returns `Game.ini`, `GameUserSettings.ini`, or both directly in the assistant chat.
+- `beacon_export_project_file` writes the exported config to a local `.txt` file when the output is too large for a comfortable chat response.
 
 These tools are designed to be used through an assistant conversation rather than as blind writes. A good assistant flow is:
 
@@ -194,6 +198,12 @@ Local backups are written to:
 ~/.beacon-mcp/backups/
 ```
 
+Large local exports are written to:
+
+```text
+~/.beacon-mcp/exports/
+```
+
 Example workflow for Cybers Structures QoL+ Tek Forge:
 
 ```text
@@ -202,6 +212,13 @@ Call beacon_list_engrams game="arksa" filter="tek forge" contentPackId="<content
 Call beacon_create_project game="arksa" name="test 180" mapMask=1
 Call beacon_set_project_mod game="arksa" projectId="<projectId>" contentPackId="<contentPackId>"
 Call beacon_set_engram_unlock game="arksa" projectId="<projectId>" engramId="<engramId>" level=180
+```
+
+Example export requests:
+
+```text
+Call beacon_export_project_code projectId="<projectId>" game="arksa"
+Call beacon_export_project_file projectId="<projectId>" game="arksa" file="all" projectName="test tek forge 180"
 ```
 
 ---
@@ -259,6 +276,8 @@ Call beacon_list_projects
 - `beacon_create_project`
 - `beacon_set_project_mod`
 - `beacon_set_engram_unlock`
+- `beacon_export_project_code`
+- `beacon_export_project_file`
 - `beacon_generate_game_ini`
 - `beacon_put_game_ini`
 - `beacon_generate_game_user_settings_ini`

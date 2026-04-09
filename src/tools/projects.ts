@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import axios from "axios";
 import { ToolDefinition } from "../registry.js";
 import {
   textResult,
@@ -169,6 +170,27 @@ async function writeProjectBackup(projectId: string, binary: Buffer): Promise<{ 
   };
 }
 
+function createTimestampSlug(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function sanitizeFileSegment(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[^\w.-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase();
+}
+
+async function writeProjectExportFile(filename: string, content: string): Promise<string> {
+  const exportDir = join(homedir(), ".beacon-mcp", "exports");
+  await mkdir(exportDir, { recursive: true });
+  const exportPath = join(exportDir, filename);
+  await writeFile(exportPath, content, "utf8");
+  return exportPath;
+}
+
 function buildInitialProjectData(): JsonRecord {
   return {
     configSets: [{ name: "Base", configSetId: BASE_CONFIG_SET_ID }],
@@ -192,6 +214,22 @@ async function getProjectConfigFile(
   return typeof res.data === "string" ? res.data : JSON.stringify(res.data, null, 2);
 }
 
+async function getProjectConfigFileOptional(
+  projectId: string,
+  game: ProjectGame,
+  fileName: "Game.ini" | "GameUserSettings.ini",
+  params?: Record<string, unknown>
+): Promise<string | undefined> {
+  try {
+    return await getProjectConfigFile(projectId, game, fileName, params);
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.status === 404) {
+      return undefined;
+    }
+    throw err;
+  }
+}
+
 async function putProjectConfigFile(
   projectId: string,
   game: ProjectGame,
@@ -201,6 +239,18 @@ async function putProjectConfigFile(
   await beaconClient.put(`/${game}/projects/${projectId}/${fileName}`, content, {
     headers: { "Content-Type": "text/plain" },
   });
+}
+
+function buildConfigParams(
+  qualityScale?: number,
+  difficultyValue?: number,
+  mapMask?: string
+): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  if (qualityScale !== undefined) params.qualityScale = qualityScale;
+  if (difficultyValue !== undefined) params.difficultyValue = difficultyValue;
+  if (mapMask) params.mapMask = mapMask;
+  return params;
 }
 
 function optionalBoolean(args: Record<string, unknown>, key: string, defaultValue?: boolean) {
@@ -880,6 +930,275 @@ const setEngramUnlockTool: ToolDefinition = {
   },
 };
 
+// ---- beacon_export_project_code ----
+
+const exportProjectCodeTool: ToolDefinition = {
+  name: "beacon_export_project_code",
+  description:
+    "Exporte directement dans le chat le code de configuration d'un projet Beacon sans passer par l'interface Beacon. " +
+    "Retourne Game.ini, GameUserSettings.ini, ou les deux dans un seul résultat. " +
+    "Utile quand l'utilisateur demande 'donne-moi le code du projet' ou veut copier/coller la configuration serveur.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      projectId: { type: "string", description: "ID du projet" },
+      game: {
+        type: "string",
+        enum: [...PROJECT_GAMES],
+        description: "Jeu cible : 'ark' ou 'arksa'",
+      },
+      file: {
+        type: "string",
+        enum: ["all", "game", "gus"],
+        description: "Choisir 'all', 'game' pour Game.ini, ou 'gus' pour GameUserSettings.ini. Défaut : all",
+      },
+      qualityScale: {
+        type: "number",
+        description: "Multiplicateur de qualité des items pour la génération Game.ini (optionnel)",
+      },
+      difficultyValue: {
+        type: "number",
+        description: "Valeur de difficulté pour la génération Game.ini (optionnel)",
+      },
+      mapMask: {
+        type: "string",
+        description: "Masque de carte optionnel pour générer l'export ciblé",
+      },
+    },
+    required: ["projectId", "game"],
+  },
+  handler: async (args) => {
+    const projectIdResult = requireString(args, "projectId");
+    if (!projectIdResult.ok) return projectIdResult.result;
+    const gameResult = requireGame(args, "game", PROJECT_GAMES);
+    if (!gameResult.ok) return gameResult.result;
+    const fileResult = optionalString(args, "file");
+    if (!fileResult.ok) return fileResult.result;
+    const qualityScaleResult = optionalNumber(args, "qualityScale");
+    if (!qualityScaleResult.ok) return qualityScaleResult.result;
+    const difficultyValueResult = optionalNumber(args, "difficultyValue");
+    if (!difficultyValueResult.ok) return difficultyValueResult.result;
+    const mapMaskResult = optionalString(args, "mapMask");
+    if (!mapMaskResult.ok) return mapMaskResult.result;
+
+    const projectId = projectIdResult.value;
+    const game = gameResult.value as ProjectGame;
+    const file = (fileResult.value ?? "all").toLowerCase();
+    const allowedFiles = ["all", "game", "gus"] as const;
+    if (!allowedFiles.includes(file as (typeof allowedFiles)[number])) {
+      return invalidParams("Paramètre file invalide. Valeurs acceptées : all, game, gus.", {
+        field: "file",
+        acceptedValues: allowedFiles,
+      });
+    }
+
+    try {
+      const params = buildConfigParams(
+        qualityScaleResult.value,
+        difficultyValueResult.value,
+        mapMaskResult.value
+      );
+
+      const includeGameIni = file === "all" || file === "game";
+      const includeGus = file === "all" || file === "gus";
+      const [gameIni, gameUserSettingsIni] = await Promise.all([
+        includeGameIni ? getProjectConfigFile(projectId, game, "Game.ini", params) : Promise.resolve(undefined),
+        includeGus
+          ? file === "all"
+            ? getProjectConfigFileOptional(projectId, game, "GameUserSettings.ini")
+            : getProjectConfigFile(projectId, game, "GameUserSettings.ini")
+          : Promise.resolve(undefined),
+      ]);
+
+      const sections: string[] = [];
+      if (gameIni !== undefined) {
+        sections.push(["[Game.ini]", "```ini", gameIni, "```"].join("\n"));
+      }
+      if (gameUserSettingsIni !== undefined) {
+        sections.push(["[GameUserSettings.ini]", "```ini", gameUserSettingsIni, "```"].join("\n"));
+      } else if (includeGus && file === "all") {
+        sections.push(
+          "[GameUserSettings.ini]\n```text\nNon disponible via l'API Beacon pour ce projet.\n```"
+        );
+      }
+
+      return textResult(
+        `Export de configuration pour ${gameName(game)} (projet ${projectId}) :\n\n${sections.join("\n\n")}`,
+        {
+          projectId,
+          game,
+          files: {
+            ...(gameIni !== undefined ? { "Game.ini": gameIni } : {}),
+            ...(gameUserSettingsIni !== undefined
+              ? { "GameUserSettings.ini": gameUserSettingsIni }
+              : includeGus && file === "all"
+              ? { "GameUserSettings.ini": null }
+              : {}),
+          },
+        },
+        {
+          projectId,
+          game,
+          file,
+          mapMask: mapMaskResult.value,
+        }
+      );
+    } catch (err) {
+      return formatApiError(err);
+    }
+  },
+};
+
+// ---- beacon_export_project_file ----
+
+const exportProjectFileTool: ToolDefinition = {
+  name: "beacon_export_project_file",
+  description:
+    "Exporte la configuration d'un projet Beacon dans un fichier local sans passer par l'interface Beacon. " +
+    "Idéal pour les gros projets quand le code serait trop long pour le chat. " +
+    "Le MCP écrit un fichier texte local dans ~/.beacon-mcp/exports/ puis retourne son chemin exact.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      projectId: { type: "string", description: "ID du projet" },
+      game: {
+        type: "string",
+        enum: [...PROJECT_GAMES],
+        description: "Jeu cible : 'ark' ou 'arksa'",
+      },
+      file: {
+        type: "string",
+        enum: ["all", "game", "gus"],
+        description: "Choisir 'all', 'game' pour Game.ini, ou 'gus' pour GameUserSettings.ini. Défaut : all",
+      },
+      qualityScale: {
+        type: "number",
+        description: "Multiplicateur de qualité des items pour la génération Game.ini (optionnel)",
+      },
+      difficultyValue: {
+        type: "number",
+        description: "Valeur de difficulté pour la génération Game.ini (optionnel)",
+      },
+      mapMask: {
+        type: "string",
+        description: "Masque de carte optionnel pour générer l'export ciblé",
+      },
+      projectName: {
+        type: "string",
+        description: "Nom du projet pour construire un nom de fichier plus lisible (optionnel)",
+      },
+    },
+    required: ["projectId", "game"],
+  },
+  handler: async (args) => {
+    const projectIdResult = requireString(args, "projectId");
+    if (!projectIdResult.ok) return projectIdResult.result;
+    const gameResult = requireGame(args, "game", PROJECT_GAMES);
+    if (!gameResult.ok) return gameResult.result;
+    const fileResult = optionalString(args, "file");
+    if (!fileResult.ok) return fileResult.result;
+    const qualityScaleResult = optionalNumber(args, "qualityScale");
+    if (!qualityScaleResult.ok) return qualityScaleResult.result;
+    const difficultyValueResult = optionalNumber(args, "difficultyValue");
+    if (!difficultyValueResult.ok) return difficultyValueResult.result;
+    const mapMaskResult = optionalString(args, "mapMask");
+    if (!mapMaskResult.ok) return mapMaskResult.result;
+    const projectNameResult = optionalString(args, "projectName");
+    if (!projectNameResult.ok) return projectNameResult.result;
+
+    const projectId = projectIdResult.value;
+    const game = gameResult.value as ProjectGame;
+    const file = (fileResult.value ?? "all").toLowerCase();
+    const allowedFiles = ["all", "game", "gus"] as const;
+    if (!allowedFiles.includes(file as (typeof allowedFiles)[number])) {
+      return invalidParams("Paramètre file invalide. Valeurs acceptées : all, game, gus.", {
+        field: "file",
+        acceptedValues: allowedFiles,
+      });
+    }
+
+    try {
+      const params = buildConfigParams(
+        qualityScaleResult.value,
+        difficultyValueResult.value,
+        mapMaskResult.value
+      );
+
+      const includeGameIni = file === "all" || file === "game";
+      const includeGus = file === "all" || file === "gus";
+      const [gameIni, gameUserSettingsIni] = await Promise.all([
+        includeGameIni ? getProjectConfigFile(projectId, game, "Game.ini", params) : Promise.resolve(undefined),
+        includeGus
+          ? file === "all"
+            ? getProjectConfigFileOptional(projectId, game, "GameUserSettings.ini")
+            : getProjectConfigFile(projectId, game, "GameUserSettings.ini")
+          : Promise.resolve(undefined),
+      ]);
+
+      const projectName = projectNameResult.value ?? projectId;
+      const lines = [
+        `Project: ${projectName}`,
+        `Project ID: ${projectId}`,
+        `Game: ${gameName(game)}`,
+        ...(mapMaskResult.value ? [`Map Mask: ${mapMaskResult.value}`] : []),
+        "",
+      ];
+
+      if (gameIni !== undefined) {
+        lines.push("===== Game.ini =====", gameIni, "");
+      }
+      if (gameUserSettingsIni !== undefined) {
+        lines.push("===== GameUserSettings.ini =====", gameUserSettingsIni, "");
+      } else if (includeGus && file === "all") {
+        lines.push(
+          "===== GameUserSettings.ini =====",
+          "Non disponible via l'API Beacon pour ce projet.",
+          ""
+        );
+      }
+
+      const filename = [
+        sanitizeFileSegment(projectName) || "beacon-project",
+        sanitizeFileSegment(file),
+        createTimestampSlug(),
+      ].join("-") + ".txt";
+
+      const exportPath = await writeProjectExportFile(filename, lines.join("\n"));
+
+      return textResult(
+        [
+          `Export local créé pour ${gameName(game)}.`,
+          `Projet : ${projectName} (${projectId})`,
+          `Fichier : ${exportPath}`,
+        ].join("\n"),
+        {
+          projectId,
+          projectName,
+          game,
+          file,
+          exportPath,
+          exportedFiles: {
+            ...(gameIni !== undefined ? { "Game.ini": true } : {}),
+            ...(gameUserSettingsIni !== undefined
+              ? { "GameUserSettings.ini": true }
+              : includeGus && file === "all"
+              ? { "GameUserSettings.ini": false }
+              : {}),
+          },
+        },
+        {
+          projectId,
+          game,
+          file,
+          exportPath,
+        }
+      );
+    } catch (err) {
+      return formatApiError(err);
+    }
+  },
+};
+
 // ---- beacon_generate_game_ini ----
 
 const generateGameIniTool: ToolDefinition = {
@@ -931,10 +1250,7 @@ const generateGameIniTool: ToolDefinition = {
     const difficultyValue = difficultyValueResult.value;
     const mapMask = mapMaskResult.value;
     try {
-      const params: Record<string, unknown> = {};
-      if (qualityScale !== undefined) params.qualityScale = qualityScale;
-      if (difficultyValue !== undefined) params.difficultyValue = difficultyValue;
-      if (mapMask) params.mapMask = mapMask;
+      const params = buildConfigParams(qualityScale, difficultyValue, mapMask);
 
       const ini = await getProjectConfigFile(projectId, game, "Game.ini", params);
       return textResult(`Game.ini — ${gameName(game)} (projet ${projectId}) :\n\n${ini}`, {
@@ -1263,6 +1579,8 @@ export function registerProjectTools(server: McpServer): void {
     createProjectTool,
     setProjectModTool,
     setEngramUnlockTool,
+    exportProjectCodeTool,
+    exportProjectFileTool,
     generateGameIniTool,
     putGameIniTool,
     generateGameUserSettingsIniTool,
