@@ -6,6 +6,8 @@ export interface ToolInputSchema {
 
 export interface ToolResult {
   content: Array<{ type: "text"; text: string }>;
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
   [key: string]: unknown;
 }
 

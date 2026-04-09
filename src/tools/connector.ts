@@ -1,19 +1,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { ToolDefinition } from "../registry.js";
+import { ToolDefinition, ToolResult } from "../registry.js";
 import { sendConnectorCommand, ConnectorConfig } from "../connector/client.js";
-import { textResult, registerToolGroup } from "./shared.js";
+import {
+  textResult,
+  registerToolGroup,
+  errorResult,
+  requireString,
+  optionalNumber,
+} from "./shared.js";
 
 /** Extrait et valide la config connector depuis les args MCP. */
-function extractConfig(args: Record<string, unknown>): ConnectorConfig | string {
-  const { host, port, key } = args;
-  if (typeof host !== "string" || !host.trim()) {
-    return "Paramètre host requis (adresse IP ou hostname du serveur Connector).";
-  }
-  if (typeof key !== "string" || !key.trim()) {
-    return "Paramètre key requis (clé pré-partagée du Connector, hex 64 chars ou chaîne quelconque).";
-  }
-  const config: ConnectorConfig = { host: host.trim(), key: key.trim() };
-  if (typeof port === "number" && port > 0) config.port = port;
+function extractConfig(args: Record<string, unknown>): ConnectorConfig | ToolResult {
+  const hostResult = requireString(args, "host");
+  if (!hostResult.ok) return hostResult.result;
+  const keyResult = requireString(args, "key");
+  if (!keyResult.ok) return keyResult.result;
+  const portResult = optionalNumber(args, "port");
+  if (!portResult.ok) return portResult.result;
+
+  const config: ConnectorConfig = { host: hostResult.value, key: keyResult.value };
+  if (portResult.value !== undefined && portResult.value > 0) config.port = portResult.value;
   return config;
 }
 
@@ -54,17 +60,24 @@ const startServerTool: ToolDefinition = {
   },
   handler: async (args) => {
     const config = extractConfig(args);
-    if (typeof config === "string") return textResult(config);
+    if ("content" in config) return config;
     try {
       const res = await sendConnectorCommand(config, "Start");
       const success = res["Success"] === true;
-      return textResult(
+      return success
+        ? textResult(
         success
           ? `Serveur démarré avec succès sur ${config.host}.`
-          : `Le Connector a retourné un échec lors du démarrage.`
-      );
+          : `Le Connector a retourné un échec lors du démarrage.`,
+        res,
+        { host: config.host, port: config.port }
+      )
+        : errorResult(`Le Connector a retourné un échec lors du démarrage.`, "connector_start_failed", res, {
+            host: config.host,
+            port: config.port,
+          });
     } catch (err) {
-      return textResult(formatConnectorError(err));
+      return errorResult(formatConnectorError(err), "connector_error");
     }
   },
 };
@@ -92,7 +105,7 @@ const stopServerTool: ToolDefinition = {
   },
   handler: async (args) => {
     const config = extractConfig(args);
-    if (typeof config === "string") return textResult(config);
+    if ("content" in config) return config;
     const extra: Record<string, unknown> = {};
     if (typeof args.message === "string" && args.message.trim()) {
       extra["Message"] = args.message.trim();
@@ -100,13 +113,21 @@ const stopServerTool: ToolDefinition = {
     try {
       const res = await sendConnectorCommand(config, "Stop", extra);
       const success = res["Success"] === true;
-      return textResult(
+      return success
+        ? textResult(
         success
           ? `Serveur arrêté avec succès sur ${config.host}.`
-          : `Le Connector a retourné un échec lors de l'arrêt.`
-      );
+          : `Le Connector a retourné un échec lors de l'arrêt.`,
+        res,
+        { host: config.host, port: config.port, message: extra["Message"] }
+      )
+        : errorResult(`Le Connector a retourné un échec lors de l'arrêt.`, "connector_stop_failed", res, {
+            host: config.host,
+            port: config.port,
+            message: extra["Message"],
+          });
     } catch (err) {
-      return textResult(formatConnectorError(err));
+      return errorResult(formatConnectorError(err), "connector_error");
     }
   },
 };
@@ -129,7 +150,7 @@ const getServerStatusTool: ToolDefinition = {
   },
   handler: async (args) => {
     const config = extractConfig(args);
-    if (typeof config === "string") return textResult(config);
+    if ("content" in config) return config;
     try {
       const res = await sendConnectorCommand(config, "Status");
       const status = res["Status"] as string | undefined;
@@ -139,9 +160,9 @@ const getServerStatusTool: ToolDefinition = {
           : status === "stopped"
           ? "Serveur arrêté."
           : `Statut inconnu : ${status}`;
-      return textResult(`${config.host} — ${label}`);
+      return textResult(`${config.host} — ${label}`, res, { host: config.host, port: config.port });
     } catch (err) {
-      return textResult(formatConnectorError(err));
+      return errorResult(formatConnectorError(err), "connector_error");
     }
   },
 };
@@ -174,27 +195,35 @@ const setServerParamTool: ToolDefinition = {
   },
   handler: async (args) => {
     const config = extractConfig(args);
-    if (typeof config === "string") return textResult(config);
-    const { param, value } = args;
-    if (typeof param !== "string" || !param.trim()) {
-      return textResult("Paramètre param requis.");
-    }
-    if (typeof value !== "string") {
-      return textResult("Paramètre value requis.");
-    }
+    if ("content" in config) return config;
+    const paramResult = requireString(args, "param");
+    if (!paramResult.ok) return paramResult.result;
+    const valueResult = requireString(args, "value");
+    if (!valueResult.ok) return valueResult.result;
+    const param = paramResult.value;
+    const value = valueResult.value;
     try {
       const res = await sendConnectorCommand(config, "Param", {
-        Param: param.trim(),
+        Param: param,
         Value: value,
       });
       const success = res["Success"] === true;
       if (success) {
-        return textResult(`Paramètre "${param}" mis à jour avec la valeur "${value}".`);
+        return textResult(`Paramètre "${param}" mis à jour avec la valeur "${value}".`, res, {
+          host: config.host,
+          port: config.port,
+          param,
+          value,
+        });
       }
       const reason = (res["Reason"] as string | undefined) ?? "Raison inconnue";
-      return textResult(`Échec de la mise à jour du paramètre : ${reason}`);
+      return errorResult(`Échec de la mise à jour du paramètre : ${reason}`, "connector_param_failed", res, {
+        host: config.host,
+        port: config.port,
+        param,
+      });
     } catch (err) {
-      return textResult(formatConnectorError(err));
+      return errorResult(formatConnectorError(err), "connector_error");
     }
   },
 };

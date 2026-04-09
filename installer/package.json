@@ -1,0 +1,12 @@
+{
+  "name": "beacon-mcp-installer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows installer workspace for Beacon MCP",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "install:run": "node dist/cli.js --install-defaults",
+    "detect": "node dist/cli.js --detect",
+    "install:json": "node dist/cli.js --install-defaults --json"
+  }
+}

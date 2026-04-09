@@ -37,7 +37,19 @@ function buildOpenApiSpec(baseUrl) {
                 responses: {
                     "200": {
                         description: "Résultat du tool",
-                        content: { "application/json": { schema: { type: "object", properties: { result: { type: "string" } } } } },
+                        content: {
+                            "application/json": {
+                                schema: {
+                                    type: "object",
+                                    properties: {
+                                        ok: { type: "boolean" },
+                                        result: { type: "string" },
+                                        data: {},
+                                        error: {},
+                                    },
+                                },
+                            },
+                        },
                     },
                     "400": { description: "Paramètres invalides" },
                     "401": { description: "Authentification requise" },
@@ -81,7 +93,15 @@ async function startHttpServer(mcpServer) {
         }
         try {
             const toolResult = await tool.handler(req.body ?? {});
-            res.json({ result: toolResult.content.map((c) => c.text).join("\n") });
+            const text = toolResult.content.map((c) => c.text).join("\n");
+            const structured = typeof toolResult.structuredContent === "object" && toolResult.structuredContent !== null
+                ? toolResult.structuredContent
+                : {};
+            res.json({
+                ok: toolResult.isError !== true,
+                result: text,
+                ...structured,
+            });
         }
         catch (err) {
             console.error(`Erreur tool ${toolName}:`, err);

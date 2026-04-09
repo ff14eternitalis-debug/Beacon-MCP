@@ -1,0 +1,94 @@
+{
+  "installRoot": "C:\\Users\\forgo\\AppData\\Local\\BeaconMCP",
+  "runtimeEntryPath": "C:\\Users\\forgo\\AppData\\Local\\BeaconMCP\\dist\\index.js",
+  "clients": [
+    {
+      "client": "codex",
+      "selected": true,
+      "detection": {
+        "client": "codex",
+        "detected": true,
+        "configPath": "C:\\Users\\forgo\\.codex\\config.toml",
+        "configExists": true,
+        "isWritable": true,
+        "isRunning": true,
+        "recommendedAction": "restart_recommended",
+        "details": "Codex config detected."
+      },
+      "patch": {
+        "client": "codex",
+        "configPath": "C:\\Users\\forgo\\.codex\\config.toml",
+        "backupPath": "C:\\Users\\forgo\\.codex\\config.toml.20260409-021008.bak",
+        "created": false,
+        "updated": true,
+        "alreadyConfigured": true
+      }
+    },
+    {
+      "client": "claude",
+      "selected": true,
+      "detection": {
+        "client": "claude",
+        "detected": true,
+        "configPath": "C:\\Users\\forgo\\AppData\\Roaming\\Claude\\claude_desktop_config.json",
+        "configExists": true,
+        "isWritable": true,
+        "isRunning": false,
+        "recommendedAction": "configure",
+        "details": "Claude Desktop config detected."
+      },
+      "patch": {
+        "client": "claude",
+        "configPath": "C:\\Users\\forgo\\AppData\\Roaming\\Claude\\claude_desktop_config.json",
+        "backupPath": "C:\\Users\\forgo\\AppData\\Roaming\\Claude\\claude_desktop_config.json.20260409-021008.bak",
+        "created": false,
+        "updated": true,
+        "alreadyConfigured": true
+      }
+    },
+    {
+      "client": "cursor",
+      "selected": true,
+      "detection": {
+        "client": "cursor",
+        "detected": true,
+        "configPath": "C:\\Users\\forgo\\AppData\\Roaming\\Cursor\\User\\settings.json",
+        "configExists": true,
+        "isWritable": true,
+        "isRunning": false,
+        "recommendedAction": "configure",
+        "details": "Cursor config detected."
+      },
+      "patch": {
+        "client": "cursor",
+        "configPath": "C:\\Users\\forgo\\AppData\\Roaming\\Cursor\\User\\settings.json",
+        "backupPath": "C:\\Users\\forgo\\AppData\\Roaming\\Cursor\\User\\settings.json.20260409-021008.bak",
+        "created": false,
+        "updated": true,
+        "alreadyConfigured": true
+      }
+    }
+  ],
+  "validation": {
+    "installRootExists": true,
+    "runtimeEntryExists": true,
+    "runtimeStartupOk": true,
+    "clientConfigChecks": [
+      {
+        "client": "codex",
+        "configPath": "C:\\Users\\forgo\\.codex\\config.toml",
+        "exists": true
+      },
+      {
+        "client": "claude",
+        "configPath": "C:\\Users\\forgo\\AppData\\Roaming\\Claude\\claude_desktop_config.json",
+        "exists": true
+      },
+      {
+        "client": "cursor",
+        "configPath": "C:\\Users\\forgo\\AppData\\Roaming\\Cursor\\User\\settings.json",
+        "exists": true
+      }
+    ]
+  }
+}

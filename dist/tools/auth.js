@@ -26,10 +26,16 @@ const loginTool = {
                 `Le code expire dans ${minutes} minutes.`,
                 "",
                 "Une fois connecté, appelle beacon_login_check pour finaliser.",
-            ].join("\n"));
+            ].join("\n"), {
+                userCode: flow.userCode,
+                verificationUri: flow.verificationUri,
+                verificationUriComplete: flow.verificationUriComplete,
+                interval: flow.interval,
+                expiresIn: flow.expiresIn,
+            });
         }
         catch (err) {
-            return (0, shared_js_1.textResult)(`Impossible de démarrer le flow de connexion : ${String(err)}`);
+            return (0, shared_js_1.errorResult)(`Impossible de démarrer le flow de connexion : ${String(err)}`, "auth_start_failed");
         }
     },
 };
@@ -42,29 +48,29 @@ const loginCheckTool = {
     handler: async () => {
         const pending = (0, tokens_js_1.loadPendingFlow)();
         if (!pending) {
-            return (0, shared_js_1.textResult)("Aucune connexion en cours. Appelle beacon_login pour démarrer.");
+            return (0, shared_js_1.errorResult)("Aucune connexion en cours. Appelle beacon_login pour démarrer.", "auth_pending_missing");
         }
         try {
             const result = await (0, oauth_js_1.pollDeviceFlow)(pending);
             switch (result.status) {
                 case "pending":
-                    return (0, shared_js_1.textResult)("En attente de l'autorisation... L'utilisateur n'a pas encore validé dans son navigateur. Réessaie dans 5 secondes.");
+                    return (0, shared_js_1.textResult)("En attente de l'autorisation... L'utilisateur n'a pas encore validé dans son navigateur. Réessaie dans 5 secondes.", { status: "pending" });
                 case "expired":
-                    return (0, shared_js_1.textResult)("Le code a expiré. Appelle beacon_login pour obtenir un nouveau code.");
+                    return (0, shared_js_1.errorResult)("Le code a expiré. Appelle beacon_login pour obtenir un nouveau code.", "auth_code_expired");
                 case "success":
                     return (0, shared_js_1.textResult)([
                         "Connecté à Beacon avec succès !",
                         "Les tokens sont sauvegardés et renouvelés automatiquement.",
                         "Tu peux maintenant utiliser tous les tools Beacon.",
-                    ].join("\n"));
+                    ].join("\n"), { status: "success", tokens: result.tokens });
                 default: {
                     const _exhaustive = result;
-                    return (0, shared_js_1.textResult)(`Statut inattendu : ${JSON.stringify(_exhaustive)}`);
+                    return (0, shared_js_1.errorResult)(`Statut inattendu : ${JSON.stringify(_exhaustive)}`, "auth_unknown_status");
                 }
             }
         }
         catch (err) {
-            return (0, shared_js_1.textResult)(`Erreur lors de la vérification : ${String(err)}`);
+            return (0, shared_js_1.errorResult)(`Erreur lors de la vérification : ${String(err)}`, "auth_check_failed");
         }
     },
 };
@@ -88,9 +94,14 @@ const authStatusTool = {
                 `Refresh token expire le : ${refreshExpiry}`,
             ]
                 .filter(Boolean)
-                .join("\n"));
+                .join("\n"), {
+                connected: true,
+                userId: status.userId,
+                email: status.email,
+                tokens,
+            });
         }
-        return (0, shared_js_1.textResult)(["Non connecté à Beacon.", `Raison : ${status.error}`, "", "Appelle beacon_login pour te connecter."].join("\n"));
+        return (0, shared_js_1.errorResult)(["Non connecté à Beacon.", `Raison : ${status.error}`, "", "Appelle beacon_login pour te connecter."].join("\n"), "auth_not_connected", status);
     },
 };
 const logoutTool = {

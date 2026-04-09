@@ -1,12 +1,27 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ToolDefinition } from "../registry.js";
-import { textResult, formatApiError, isValidGame, gameName, SUPPORTED_GAMES, registerToolGroup } from "./shared.js";
+import {
+  textResult,
+  formatApiError,
+  gameName,
+  registerToolGroup,
+  requireGame,
+  type Game,
+  requireString,
+  requireRawString,
+  optionalString,
+  optionalNumber,
+  invalidParams,
+} from "./shared.js";
 import { beaconClient } from "../api/client.js";
 import { randomUUID, createHash } from "crypto";
 import { gzip } from "zlib";
 import { promisify } from "util";
 
 const gzipAsync = promisify(gzip);
+const PROJECT_GAMES = ["ark", "arksa"] as const;
+const CONFIG_OPTION_GAMES = ["ark", "arksa", "palworld", "7dtd"] as const;
+const GAME_VARIABLE_GAMES = ["ark", "arksa", "palworld"] as const;
 
 // ---------------------------------------------------------------------------
 // Format binaire .beacon
@@ -62,6 +77,30 @@ async function buildBeaconBinary(
   return Buffer.concat([BEACON_MAGIC, gz]);
 }
 
+async function getProjectConfigFile(
+  projectId: string,
+  game: (typeof PROJECT_GAMES)[number],
+  fileName: "Game.ini" | "GameUserSettings.ini",
+  params?: Record<string, unknown>
+): Promise<string> {
+  const res = await beaconClient.get(`/${game}/projects/${projectId}/${fileName}`, {
+    params,
+    responseType: "text",
+  });
+  return typeof res.data === "string" ? res.data : JSON.stringify(res.data, null, 2);
+}
+
+async function putProjectConfigFile(
+  projectId: string,
+  game: (typeof PROJECT_GAMES)[number],
+  fileName: "Game.ini" | "GameUserSettings.ini",
+  content: string
+): Promise<void> {
+  await beaconClient.put(`/${game}/projects/${projectId}/${fileName}`, content, {
+    headers: { "Content-Type": "text/plain" },
+  });
+}
+
 // ---- beacon_list_projects ----
 
 const listProjectsTool: ToolDefinition = {
@@ -73,14 +112,16 @@ const listProjectsTool: ToolDefinition = {
       const res = await beaconClient.get("/projects");
       const projects: Record<string, unknown>[] = res.data?.results ?? res.data ?? [];
       if (!Array.isArray(projects) || projects.length === 0) {
-        return textResult("Aucun projet trouvé.");
+        return textResult("Aucun projet trouvé.", [], { count: 0 });
       }
       const lines = projects.map(
         (p, i) => `${i + 1}. [${p.projectId}] ${p.name ?? "Sans nom"} (${p.gameId ?? ""})`
       );
-      return textResult(`Projets (${projects.length}) :\n${lines.join("\n")}`);
+      return textResult(`Projets (${projects.length}) :\n${lines.join("\n")}`, projects, {
+        count: projects.length,
+      });
     } catch (err) {
-      return textResult(formatApiError(err));
+      return formatApiError(err);
     }
   },
 };
@@ -98,23 +139,22 @@ const getProjectTool: ToolDefinition = {
     required: ["projectId"],
   },
   handler: async (args) => {
-    const { projectId } = args;
-    if (typeof projectId !== "string" || !projectId) {
-      return textResult("Paramètre projectId requis.");
-    }
+    const projectIdResult = requireString(args, "projectId");
+    if (!projectIdResult.ok) return projectIdResult.result;
+    const projectId = projectIdResult.value;
     try {
       const res = await beaconClient.get(`/projects/${projectId}`, {
         headers: { Accept: "application/json" },
       });
       if (typeof res.data === "object" && res.data !== null) {
-        return textResult(JSON.stringify(res.data, null, 2));
+        return textResult(JSON.stringify(res.data, null, 2), res.data, { projectId });
       }
-      return textResult(
+      return invalidParams(
         "Le projet existe mais retourne un format binaire. " +
           "Utilise beacon_generate_game_ini pour lire sa configuration."
       );
     } catch (err) {
-      return textResult(formatApiError(err));
+      return formatApiError(err);
     }
   },
 };
@@ -132,7 +172,7 @@ const createProjectTool: ToolDefinition = {
     properties: {
       game: {
         type: "string",
-        enum: ["ark", "arksa"],
+        enum: [...PROJECT_GAMES],
         description: "Jeu cible : 'ark' ou 'arksa'",
       },
       name: { type: "string", description: "Nom du projet" },
@@ -141,18 +181,21 @@ const createProjectTool: ToolDefinition = {
     required: ["game", "name"],
   },
   handler: async (args) => {
-    const { game, name, description } = args;
-    if (!isValidGame(game)) {
-      return textResult(`Jeu invalide. Valeurs acceptées : ${SUPPORTED_GAMES.join(", ")}`);
-    }
-    if (typeof name !== "string" || !name.trim()) {
-      return textResult("Paramètre name requis.");
-    }
+    const gameResult = requireGame(args, "game", PROJECT_GAMES);
+    if (!gameResult.ok) return gameResult.result;
+    const nameResult = requireString(args, "name");
+    if (!nameResult.ok) return nameResult.result;
+    const descriptionResult = optionalString(args, "description");
+    if (!descriptionResult.ok) return descriptionResult.result;
+
+    const game = gameResult.value as (typeof PROJECT_GAMES)[number];
+    const name = nameResult.value;
+    const description = descriptionResult.value;
     try {
       const meRes = await beaconClient.get("/users/me");
       const userId: string = meRes.data?.userId;
       if (!userId) {
-        return textResult("Impossible de récupérer l'userId. Vérifiez la connexion avec beacon_auth_status.");
+        return invalidParams("Impossible de récupérer l'userId. Vérifiez la connexion avec beacon_auth_status.");
       }
 
       const projectId = randomUUID();
@@ -165,8 +208,8 @@ const createProjectTool: ToolDefinition = {
         files: ["v7.json"],
         projectId,
         gameId,
-        name: name.trim(),
-        description: typeof description === "string" ? description.trim() : "",
+        name,
+        description: description ?? "",
         members: {
           [userId]: { role: "Owner", encryptedPassword: null, fingerprint: null },
         },
@@ -190,10 +233,12 @@ const createProjectTool: ToolDefinition = {
           `ID   : ${created.projectId ?? projectId}`,
           `Nom  : ${created.name ?? name}`,
           `Jeu  : ${gameName(game)}`,
-        ].join("\n")
+        ].join("\n"),
+        created,
+        { projectId: created.projectId ?? projectId, game }
       );
     } catch (err) {
-      return textResult(formatApiError(err));
+      return formatApiError(err);
     }
   },
 };
@@ -213,7 +258,7 @@ const generateGameIniTool: ToolDefinition = {
       projectId: { type: "string", description: "ID du projet" },
       game: {
         type: "string",
-        enum: ["ark", "arksa"],
+        enum: [...PROJECT_GAMES],
         description: "Jeu cible : 'ark' ou 'arksa'",
       },
       qualityScale: {
@@ -232,27 +277,37 @@ const generateGameIniTool: ToolDefinition = {
     required: ["projectId", "game"],
   },
   handler: async (args) => {
-    const { projectId, game, qualityScale, difficultyValue, mapMask } = args;
-    if (typeof projectId !== "string" || !projectId) {
-      return textResult("Paramètre projectId requis.");
-    }
-    if (!isValidGame(game)) {
-      return textResult(`Jeu invalide. Valeurs acceptées : ${SUPPORTED_GAMES.join(", ")}`);
-    }
+    const projectIdResult = requireString(args, "projectId");
+    if (!projectIdResult.ok) return projectIdResult.result;
+    const gameResult = requireGame(args, "game", PROJECT_GAMES);
+    if (!gameResult.ok) return gameResult.result;
+    const qualityScaleResult = optionalNumber(args, "qualityScale");
+    if (!qualityScaleResult.ok) return qualityScaleResult.result;
+    const difficultyValueResult = optionalNumber(args, "difficultyValue");
+    if (!difficultyValueResult.ok) return difficultyValueResult.result;
+    const mapMaskResult = optionalString(args, "mapMask");
+    if (!mapMaskResult.ok) return mapMaskResult.result;
+
+    const projectId = projectIdResult.value;
+    const game = gameResult.value as (typeof PROJECT_GAMES)[number];
+    const qualityScale = qualityScaleResult.value;
+    const difficultyValue = difficultyValueResult.value;
+    const mapMask = mapMaskResult.value;
     try {
       const params: Record<string, unknown> = {};
-      if (typeof qualityScale === "number") params.qualityScale = qualityScale;
-      if (typeof difficultyValue === "number") params.difficultyValue = difficultyValue;
-      if (typeof mapMask === "string" && mapMask.trim()) params.mapMask = mapMask.trim();
+      if (qualityScale !== undefined) params.qualityScale = qualityScale;
+      if (difficultyValue !== undefined) params.difficultyValue = difficultyValue;
+      if (mapMask) params.mapMask = mapMask;
 
-      const res = await beaconClient.get(`/${game}/projects/${projectId}/Game.ini`, {
-        params,
-        responseType: "text",
+      const ini = await getProjectConfigFile(projectId, game, "Game.ini", params);
+      return textResult(`Game.ini — ${gameName(game)} (projet ${projectId}) :\n\n${ini}`, {
+        projectId,
+        game,
+        file: "Game.ini",
+        content: ini,
       });
-      const ini = typeof res.data === "string" ? res.data : JSON.stringify(res.data, null, 2);
-      return textResult(`Game.ini — ${gameName(game)} (projet ${projectId}) :\n\n${ini}`);
     } catch (err) {
-      return textResult(formatApiError(err));
+      return formatApiError(err);
     }
   },
 };
@@ -272,7 +327,7 @@ const putGameIniTool: ToolDefinition = {
       projectId: { type: "string", description: "ID du projet" },
       game: {
         type: "string",
-        enum: ["ark", "arksa"],
+        enum: [...PROJECT_GAMES],
         description: "Jeu cible : 'ark' ou 'arksa'",
       },
       content: {
@@ -283,25 +338,117 @@ const putGameIniTool: ToolDefinition = {
     required: ["projectId", "game", "content"],
   },
   handler: async (args) => {
-    const { projectId, game, content } = args;
-    if (typeof projectId !== "string" || !projectId) {
-      return textResult("Paramètre projectId requis.");
-    }
-    if (!isValidGame(game)) {
-      return textResult(`Jeu invalide. Valeurs acceptées : ${SUPPORTED_GAMES.join(", ")}`);
-    }
-    if (typeof content !== "string" || !content.trim()) {
-      return textResult("Paramètre content requis (contenu INI).");
-    }
+    const projectIdResult = requireString(args, "projectId");
+    if (!projectIdResult.ok) return projectIdResult.result;
+    const gameResult = requireGame(args, "game", PROJECT_GAMES);
+    if (!gameResult.ok) return gameResult.result;
+    const contentResult = requireRawString(args, "content", "content");
+    if (!contentResult.ok) return contentResult.result;
+
+    const projectId = projectIdResult.value;
+    const game = gameResult.value as (typeof PROJECT_GAMES)[number];
+    const content = contentResult.value;
     try {
-      await beaconClient.put(`/${game}/projects/${projectId}/Game.ini`, content, {
-        headers: { "Content-Type": "text/plain" },
-      });
+      await putProjectConfigFile(projectId, game, "Game.ini", content);
       return textResult(
-        `Game.ini mis à jour avec succès pour le projet ${projectId} (${gameName(game)}).`
+        `Game.ini mis à jour avec succès pour le projet ${projectId} (${gameName(game)}).`,
+        { projectId, game, file: "Game.ini" }
       );
     } catch (err) {
-      return textResult(formatApiError(err));
+      return formatApiError(err);
+    }
+  },
+};
+
+// ---- beacon_generate_game_user_settings_ini ----
+
+const generateGameUserSettingsIniTool: ToolDefinition = {
+  name: "beacon_generate_game_user_settings_ini",
+  description:
+    "Génère et retourne le contenu du fichier GameUserSettings.ini pour un projet Beacon. " +
+    "Utiliser ce tool pour lire la configuration actuelle avant de la modifier. " +
+    "game : 'ark' (ARK: Survival Evolved) ou 'arksa' (ARK: Survival Ascended).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      projectId: { type: "string", description: "ID du projet" },
+      game: {
+        type: "string",
+        enum: [...PROJECT_GAMES],
+        description: "Jeu cible : 'ark' ou 'arksa'",
+      },
+    },
+    required: ["projectId", "game"],
+  },
+  handler: async (args) => {
+    const projectIdResult = requireString(args, "projectId");
+    if (!projectIdResult.ok) return projectIdResult.result;
+    const gameResult = requireGame(args, "game", PROJECT_GAMES);
+    if (!gameResult.ok) return gameResult.result;
+
+    const projectId = projectIdResult.value;
+    const game = gameResult.value as (typeof PROJECT_GAMES)[number];
+    try {
+      const ini = await getProjectConfigFile(projectId, game, "GameUserSettings.ini");
+      return textResult(
+        `GameUserSettings.ini — ${gameName(game)} (projet ${projectId}) :\n\n${ini}`,
+        {
+          projectId,
+          game,
+          file: "GameUserSettings.ini",
+          content: ini,
+        }
+      );
+    } catch (err) {
+      return formatApiError(err);
+    }
+  },
+};
+
+// ---- beacon_put_game_user_settings_ini ----
+
+const putGameUserSettingsIniTool: ToolDefinition = {
+  name: "beacon_put_game_user_settings_ini",
+  description:
+    "Met à jour le fichier GameUserSettings.ini d'un projet Beacon en envoyant le contenu INI complet. " +
+    "Workflow recommandé : 1) appeler beacon_generate_game_user_settings_ini pour lire le contenu actuel, " +
+    "2) modifier le texte INI, 3) appeler ce tool pour sauvegarder. " +
+    "game : 'ark' ou 'arksa'. content : contenu complet du fichier GameUserSettings.ini (texte brut).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      projectId: { type: "string", description: "ID du projet" },
+      game: {
+        type: "string",
+        enum: [...CONFIG_OPTION_GAMES],
+        description: "Jeu cible : 'ark', 'arksa', 'palworld' ou '7dtd'",
+      },
+      content: {
+        type: "string",
+        description: "Contenu complet du fichier GameUserSettings.ini (texte brut INI)",
+      },
+    },
+    required: ["projectId", "game", "content"],
+  },
+  handler: async (args) => {
+    const projectIdResult = requireString(args, "projectId");
+    if (!projectIdResult.ok) return projectIdResult.result;
+    const gameResult = requireGame(args, "game", PROJECT_GAMES);
+    if (!gameResult.ok) return gameResult.result;
+    const contentResult = requireRawString(args, "content", "content");
+    if (!contentResult.ok) return contentResult.result;
+
+    const projectId = projectIdResult.value;
+    const game = gameResult.value as (typeof PROJECT_GAMES)[number];
+    const content = contentResult.value;
+    try {
+      await putProjectConfigFile(projectId, game, "GameUserSettings.ini", content);
+      return textResult(
+        `GameUserSettings.ini mis à jour avec succès pour le projet ${projectId} (${gameName(game)}).`,
+        { projectId, game, file: "GameUserSettings.ini" }
+      );
+    } catch (err) {
+      return formatApiError(err);
     }
   },
 };
@@ -331,18 +478,24 @@ const getConfigOptionsTool: ToolDefinition = {
     required: ["game"],
   },
   handler: async (args) => {
-    const { game, filter } = args;
-    if (!isValidGame(game)) {
-      return textResult(`Jeu invalide. Valeurs acceptées : ${SUPPORTED_GAMES.join(", ")}`);
-    }
+    const gameResult = requireGame(args);
+    if (!gameResult.ok) return gameResult.result;
+    const filterResult = optionalString(args, "filter");
+    if (!filterResult.ok) return filterResult.result;
+    const game = gameResult.value;
+    const filter = filterResult.value;
     try {
       const params: Record<string, string> = { pageSize: "250" };
-      if (typeof filter === "string" && filter.trim()) params.search = filter.trim();
+      if (filter) params.search = filter;
       const res = await beaconClient.get(`/${game}/configOptions`, { params });
       const options: Record<string, unknown>[] = res.data?.results ?? res.data ?? [];
       if (!Array.isArray(options) || options.length === 0) {
-        return textResult(`Aucune option de configuration trouvée pour ${gameName(game)}.`);
+        return textResult(`Aucune option de configuration trouvée pour ${gameName(game)}.`, [], {
+          count: 0,
+          game,
+        });
       }
+      const supportsGameVariables = (GAME_VARIABLE_GAMES as readonly Game[]).includes(game);
       const lines = options.map((o) => {
         const header = o.header ? `[${o.header}]` : "";
         const key = o.key ?? o.configOptionId;
@@ -355,10 +508,111 @@ const getConfigOptionsTool: ToolDefinition = {
         return `• ${header} ${key} [${type}]${def}${file}${desc}`;
       });
       return textResult(
-        `Options de configuration pour ${gameName(game)} (${options.length}) :\n${lines.join("\n")}`
+        `Options de configuration pour ${gameName(game)} (${options.length}) :\n${lines.join("\n")}` +
+          (supportsGameVariables
+            ? "\n\nLes variables de jeu associees peuvent etre explorees avec beacon_list_game_variables."
+            : ""),
+        options,
+        { count: options.length, game, filter }
       );
     } catch (err) {
-      return textResult(formatApiError(err));
+      return formatApiError(err);
+    }
+  },
+};
+
+// ---- beacon_list_command_line_options ----
+
+const listCommandLineOptionsTool: ToolDefinition = {
+  name: "beacon_list_command_line_options",
+  description:
+    "Liste les options Beacon liées à la ligne de commande pour un jeu. " +
+    "Ces options proviennent de la classe ConfigOption et sont filtrées sur les fichiers " +
+    "'CommandLineFlag' et 'CommandLineOption'. " +
+    "kind : 'all', 'flag' ou 'option'. filter : filtre textuel optionnel.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      game: {
+        type: "string",
+        enum: ["ark", "arksa"],
+        description: "Jeu cible : 'ark' ou 'arksa'",
+      },
+      kind: {
+        type: "string",
+        enum: ["all", "flag", "option"],
+        description: "Type de paramètres à lister",
+      },
+      filter: {
+        type: "string",
+        description: "Filtre optionnel sur le label ou la clé",
+      },
+    },
+    required: ["game"],
+  },
+  handler: async (args) => {
+    const gameResult = requireGame(args);
+    if (!gameResult.ok) return gameResult.result;
+    const filterResult = optionalString(args, "filter");
+    if (!filterResult.ok) return filterResult.result;
+    const kindRawResult = optionalString(args, "kind");
+    if (!kindRawResult.ok) return kindRawResult.result;
+
+    const game = gameResult.value;
+    const filter = filterResult.value;
+    const allowedKinds = ["all", "flag", "option"] as const;
+    const kind = (kindRawResult.value ?? "all") as (typeof allowedKinds)[number];
+    if (!allowedKinds.includes(kind)) {
+      return invalidParams("Paramètre kind invalide. Valeurs acceptées : all, flag, option.", {
+        field: "kind",
+        acceptedValues: allowedKinds,
+      });
+    }
+
+    try {
+      const params: Record<string, string> = { pageSize: "250" };
+      if (filter) params.search = filter;
+      const res = await beaconClient.get(`/${game}/configOptions`, { params });
+      const options: Record<string, unknown>[] = res.data?.results ?? res.data ?? [];
+
+      const fileFilter =
+        kind === "flag"
+          ? ["CommandLineFlag"]
+          : kind === "option"
+          ? ["CommandLineOption"]
+          : ["CommandLineFlag", "CommandLineOption"];
+
+      const filtered = Array.isArray(options)
+        ? options.filter((o) => fileFilter.includes(String(o.file ?? "")))
+        : [];
+
+      if (filtered.length === 0) {
+        return textResult(
+          `Aucune option de ligne de commande trouvée pour ${gameName(game)}.`,
+          [],
+          { count: 0, game, kind, filter }
+        );
+      }
+
+      const lines = filtered.map((o) => {
+        const file = String(o.file ?? "");
+        const key = o.key ?? o.configOptionId;
+        const type = o.valueType ?? "?";
+        const def =
+          o.defaultValue !== undefined && o.defaultValue !== null
+            ? ` (défaut : ${o.defaultValue})`
+            : "";
+        const desc = o.description ? ` — ${o.description}` : "";
+        return `• [${file}] ${key} [${type}]${def}${desc}`;
+      });
+
+      return textResult(
+        `Options de ligne de commande pour ${gameName(game)} (${filtered.length}) :\n${lines.join("\n")}`,
+        filtered,
+        { count: filtered.length, game, kind, filter }
+      );
+    } catch (err) {
+      return formatApiError(err);
     }
   },
 };
@@ -372,6 +626,9 @@ export function registerProjectTools(server: McpServer): void {
     createProjectTool,
     generateGameIniTool,
     putGameIniTool,
+    generateGameUserSettingsIniTool,
+    putGameUserSettingsIniTool,
     getConfigOptionsTool,
+    listCommandLineOptionsTool,
   ]);
 }
