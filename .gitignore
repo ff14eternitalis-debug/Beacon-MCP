@@ -6,3 +6,4 @@ dist/
 .claude/
 output-*.json
 *-inspection.json
+doc/FR/MCP-NOTES-PRIVEES-SUITE.md
