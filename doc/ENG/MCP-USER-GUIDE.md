@@ -100,7 +100,7 @@ Call beacon_find_project query="test tek forge" game="arksa"
 ```
 
 ```text
-Call beacon_export_project_code projectName="test tek forge 180" game="arksa" format="overrides_only"
+Call beacon_set_engram_unlock projectName="test tek forge 180" game="arksa" engramName="CS Tek Forge" modName="Cybers Structures QoL+" level=180
 ```
 
 Both approaches are valid. For non-technical users, the simple style is usually the best one.
@@ -115,6 +115,7 @@ The MCP can now:
 
 - use `projectName`
 - search by partial name with `beacon_find_project`
+- search an engram by name with `beacon_find_engram`
 - ask for clarification if several projects look similar
 
 Examples:
@@ -169,6 +170,18 @@ The MCP should then:
 - verify the required mod is enabled, or propose it
 - apply the engram override
 - re-read the project
+
+Direct example without `engramId`:
+
+```text
+Call beacon_set_engram_unlock projectName="test tek forge 180" game="arksa" engramName="CS Tek Forge" modName="Cybers Structures QoL+" level=180
+```
+
+If you only want to find the engram first:
+
+```text
+Call beacon_find_engram game="arksa" query="CS Tek Forge" modName="Cybers Structures QoL+"
+```
 
 Expected useful export line:
 

@@ -5,6 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "test:smoke": "npm run build && node dist/tests/projects-smoke.js",
     "start": "node dist/index.js",
     "start:http": "node dist/index.js --http",
     "dev": "ts-node src/index.ts",

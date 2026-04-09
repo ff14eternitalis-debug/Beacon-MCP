@@ -100,7 +100,7 @@ Appelle beacon_find_project query="test tek forge" game="arksa"
 ```
 
 ```text
-Appelle beacon_export_project_code projectName="test tek forge 180" game="arksa" format="overrides_only"
+Appelle beacon_set_engram_unlock projectName="test tek forge 180" game="arksa" engramName="CS Tek Forge" modName="Cybers Structures QoL+" level=180
 ```
 
 Les deux approches sont valides. Pour un utilisateur non technique, le style simple est le meilleur.
@@ -115,6 +115,7 @@ Le MCP sait maintenant :
 
 - utiliser `projectName`
 - rechercher un projet par nom partiel avec `beacon_find_project`
+- rechercher un engram par nom avec `beacon_find_engram`
 - demander une clarification si plusieurs projets se ressemblent
 
 Exemples :
@@ -169,6 +170,18 @@ Le MCP doit alors :
 - vérifier que le mod requis est actif, ou le proposer
 - appliquer l'override d'engram
 - relire le projet
+
+Exemple direct sans `engramId` :
+
+```text
+Appelle beacon_set_engram_unlock projectName="test tek forge 180" game="arksa" engramName="CS Tek Forge" modName="Cybers Structures QoL+" level=180
+```
+
+Si tu veux juste retrouver l'engram avant modification :
+
+```text
+Appelle beacon_find_engram game="arksa" query="CS Tek Forge" modName="Cybers Structures QoL+"
+```
 
 Résultat attendu dans un export utile :
 
